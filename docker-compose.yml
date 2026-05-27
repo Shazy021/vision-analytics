@@ -1,0 +1,14 @@
+services:                          # Сервисы = контейнеры, которые поднимаются вместе
+  db:                              # Имя сервиса, будем использовать как hostname
+    image: postgres:16             # Какой образ скачать с Docker Hub
+    environment:                   # Переменные окружения внутри контейнера
+      POSTGRES_DB: vision          # Создать БД с этим именем при первом запуске
+      POSTGRES_USER: user          # Пользователь
+      POSTGRES_PASSWORD: pass      # Пароль
+    ports:
+      - "5432:5432"                # Хост:Контейнер — проброс порта наружу
+    volumes:
+      - pgdata:/var/lib/postgresql/data  # Сохранять данные между перезапусками
+
+volumes:                           # Именованные тома — Docker управляет ими сам
+  pgdata:                          # Без э
