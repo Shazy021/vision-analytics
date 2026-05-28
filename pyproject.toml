@@ -3,3 +3,12 @@
 asyncio_mode = "auto"
 # Новый event loop для каждой тест-функции (чистое окружение)
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.alembic]
+# Путь к каталогу миграций (относительно pyproject.toml)
+# %(here)s = абсолютный путь к pyproject.toml
+script_location = "%(here)s/alembic"
+
+# Добавить текущую директорию в sys.path
+# Чтобы env.py мог сделать "from app.core.config import settings"
+prepend_sys_path = ["."]
