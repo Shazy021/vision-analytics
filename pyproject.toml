@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Автоматически распознавать async-тесты без @pytest.mark.asyncio
+asyncio_mode = "auto"
+# Новый event loop для каждой тест-функции (чистое окружение)
+asyncio_default_fixture_loop_scope = "function"
