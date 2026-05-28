@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 
 # Создаём экземпляр приложения
-# title - 
 app = FastAPI(title="Vision Analytics API")
 
 # @app.get — декоратор, регистрирует маршрут
