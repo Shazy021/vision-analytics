@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict 
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://user:pass@localhost:5432/vision"
@@ -6,7 +7,6 @@ class Settings(BaseSettings):
     device: str = "gpu"                     # "cuda" если есть NVIDIA GPU
     extract_fps: int = 5   
 
-    class Config:
-        env_file = ".env"
+    model_config = ConfigDict(env_file=".env")
 
 settings = Settings()

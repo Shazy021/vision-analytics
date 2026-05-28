@@ -174,3 +174,7 @@ dmypy.json
 .pyright/
 
 .pyre/
+
+*.pt
+*.engine
+*.onnx
