@@ -1,12 +1,22 @@
+"""
+Главный файл FastAPI-приложения.
+"""
 from fastapi import FastAPI
+from app.api.routes import videos, analytics
 
-# Создаём экземпляр приложения
-app = FastAPI(title="Vision Analytics API")
+app = FastAPI(
+    title="Vision Analytics Platform",
+    description="API для видеоаналитики — обнаружение, трекинг, статистика",
+    version="0.1.0",
+)
 
-# @app.get — декоратор, регистрирует маршрут
-# "/health" — URL путь
-# async def — функция-обработчик (handler)
-# async значит "можно делать await внутри", но для простых эндпоинтов — не обязательно
+# Подключаем роутеры — все эндпоинты из videos.py и analytics.py
+# становятся доступны в приложении
+app.include_router(videos.router)
+app.include_router(analytics.router)
+
+
 @app.get("/health")
-async def health():
-    return {"status": "ok"}    # FastAPI сам конвертирует dict → JSON
+def health_check():
+    """Проверка что сервер жив"""
+    return {"status": "ok"}
