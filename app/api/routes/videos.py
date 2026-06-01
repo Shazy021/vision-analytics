@@ -2,7 +2,7 @@ import os
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File,  BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -30,18 +30,22 @@ def create_video(video_in: VideoCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/upload", response_model=VideoRead, status_code=201)
-def upload_video(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_video(
+    background_tasks: BackgroundTasks,  # ← FastAPI автоматически передаёт
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
     """
-    Загрузить видео-файл и создать запись в БД.
+    Загрузить видео-файл и запустить обработку в фоне.
 
-    UploadFile — специальный тип FastAPI для загрузки файлов.
-    File(...) — означает что параметр обязателен.
+    BackgroundTasks — встроенный механизм FastAPI.
+    Функция добавляется в очередь и выполняется ПОСЛЕ отправки ответа.
 
     Что происходит:
-    1. Сохраняем файл на диск (uploads/filename)
-    2. Создаём запись в БД
-    3. Запускаем обработку (YOLO)
-    4. Возвращаем результат
+    1. Сохраняем файл на диск
+    2. Создаём запись в БД (status="processing")
+    3. Отправляем ответ клиенту (СРАЗУ!)
+    4. В фоне запускается process_video
     """
     # Проверяем расширение
     allowed = {".mp4", ".avi", ".mov", ".mkv"}
@@ -67,23 +71,38 @@ def upload_video(file: UploadFile = File(...), db: Session = Depends(get_db)):
     db.commit()
     db.refresh(video)
 
-    # Запускаем обработку
-    try:
-        process_video(video.id, db)
-    except Exception as e:
-        print(f"Processing failed: {e}")
+    # ============================================================
+    # ФОНОВАЯ ОБРАБОТКА — не блокирует ответ!
+    # ============================================================
+    # Проблема: background_tasks запускается в том же процессе,
+    # но нам нужна своя БД-сессия (сессия запроса уже закроется).
+    # Поэтому передаём video_id, а не db-сессию.
+    background_tasks.add_task(run_processing, video.id)
 
-    # Обновляем после обработки
-    db.refresh(video)
-
-    count = db.query(func.count(Detection.id)).filter(
-        Detection.video_id == video.id
-    ).scalar()
-
+    # Считаем detections_count (пока 0)
     video_read = VideoRead.model_validate(video)
-    video_read.detections_count = count
+    video_read.detections_count = 0
     return video_read
 
+def run_processing(video_id: int) -> None:
+    """
+    Фоновая задача — создаём свою БД-сессию.
+
+    Почему не можем использовать сессию из запроса?
+    Потому что после отправки ответа FastAPI закрывает сессию
+    (finally в get_db). Если бы мы использовали ту же сессию —
+    получили бы "session is closed".
+
+    Поэтому создаём новую сессию специально для фоновой задачи.
+    """
+    from app.core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        process_video(video_id, db)
+    except Exception as e:
+        print(f"Background processing failed for video {video_id}: {e}")
+    finally:
+        db.close()
 
 @router.get("", response_model=list[VideoRead])
 def list_videos(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
