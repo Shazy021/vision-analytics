@@ -32,6 +32,11 @@ def get_db():
     finally:
         db.close() # Закрываем в любом случае — даже если была ошибка
 
+def init_db():
+    """Создаёт все таблицы по моделям (без Alembic)."""
+    from app.db.models import Video, Detection  # noqa: F401
+    Base.metadata.create_all(bind=engine)
+
 
 # Для ручной проверки подключения
 if __name__ == "__main__":
