@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     weights_path: str = "yolov8n.pt"         # n = nano, самая маленькая и быстрая модель
     device: str = "gpu"                     # "cuda" если есть NVIDIA GPU
     extract_fps: int = 5   
+    max_frames: int = 300 # 0 = без лимита, иначе обработать только N кадров
 
     model_config = ConfigDict(env_file=".env")
 

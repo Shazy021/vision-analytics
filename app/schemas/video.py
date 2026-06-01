@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 class VideoBase(BaseModel):
     """Поля, общие для создания и чтения видео"""
     filename: str
+    filepath: str | None = None
     duration: float | None = None
     fps: int | None = None
     resolution: str | None = None

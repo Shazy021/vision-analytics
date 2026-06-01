@@ -22,6 +22,8 @@ class Video(Base):
 
     # nullable=False - поле обязательное, нельзя оставлять пустым
     filename = Column(String(255), nullable=False)
+    # nullable=False - поле обязательное, нельзя оставлять пустым
+    filepath = Column(String(512), nullable=True)
 
     # nullable=True — поле необязательное (значение может быть NULL)
     duration = Column(Float, nullable=True)
