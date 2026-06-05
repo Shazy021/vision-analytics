@@ -11,7 +11,12 @@ app = FastAPI(
     version="0.1.0",
 )
 
-init_db()
+@app.on_event("startup")
+def startup():
+    try:
+        init_db()
+    except Exception:
+        pass  # DB not available (e.g. tests use SQLite)
 
 # Подключаем роутеры — все эндпоинты из videos.py и analytics.py
 # становятся доступны в приложении

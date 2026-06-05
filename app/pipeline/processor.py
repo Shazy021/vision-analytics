@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import Video, Detection
 from app.detection.yolo import YOLODetector
-from app.video.extractor import VideoCapture, frame_generator
+from app.video.extractor import VideoCapture
 
 def process_video(video_id: int, db: Session) -> None:
     """

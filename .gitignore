@@ -1,180 +1,55 @@
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
 .venv/
 venv/
-ENV/
-env/
-ENV/
-env.bak/
-venv.bak/
+*.egg-info/
 
+# IDE
 .vscode/
 .idea/
 *.swp
-*.swo
 *~
-.vs/
-.vscode-test/
 
+# OS
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 desktop.ini
-$RECYCLE.BIN/
-*.com
-*.exe
 
-logs/
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-lerna-debug.log*
-.pnpm-debug.log*
+# Environment
+.env
+.env.local
+.env.*.local
 
-pids/
-*.pid
-*.seed
-*.pid.lock
-
-coverage/
-*.lcov
-
-node_modules/
-jspm_packages/
-
+# ML models
 *.pt
 *.pth
 *.onnx
-*.engine
-*.trt
-*.tflite
-*.h5
-*.hdf5
-*.pkl
-*.joblib
 
-raw_data/
-outputs/*.mp4
-outputs/*.avi
-outputs/*.mov
-outputs/*.mkv
+# Video files
 *.mp4
 *.avi
 *.mov
 *.mkv
 
-!demos/*.gif
+# Uploads & data
+uploads/
+data/
 
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-*.ipynb
+# Docker volumes
+models_cache/
 
-*.manifest
-*.spec
-
-.python-version
-
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
-
-.dockerignore
-
-lightning_logs/
-test-tube/
-test_tube/
-wandb/
-mlruns/
-runs/
-checkpoints/
-checkpoints-*
-
-tensorboard/
-
-datasets/
-.cache/
-
-# metrics/
-# plots/
-
-.env
-.env.local
-.env.*.local
-.env.*.backup
-
-tmp/
-temp/
+# Temp
+tree.txt
 *.tmp
-*.temp
-.cache
+*.log
 
-.pytest_cache/
-.coverage
-htmlcov/
-.pytest_cache/
-hypothesis/
-
+# Tests
 .pytest_cache/
 .coverage
 htmlcov/
 
+# Type checkers
 .mypy_cache/
-.dmypy.json
-dmypy.json
-
-.tox/
-.coverage
-.cache
-
-Pipfile.lock
-
-poetry.lock
-
-.pdm.toml
-.pdm-python
-.pdm-build/
-
-.fastdev/
-
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
 .ruff_cache/
-
-.venv-black-replace/
-
-.pytype/
-
-.pyright/
-
-.pyre/
-
-*.pt
-*.engine
-*.onnx
