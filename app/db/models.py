@@ -22,7 +22,6 @@ class Video(Base):
 
     # nullable=False - поле обязательное, нельзя оставлять пустым
     filename = Column(String(255), nullable=False)
-    # nullable=False - поле обязательное, нельзя оставлять пустым
     filepath = Column(String(512), nullable=True)
 
     # nullable=True — поле необязательное (значение может быть NULL)
@@ -36,6 +35,8 @@ class Video(Base):
 
     # Статус обработки: processing -> completed / failed
     status = Column(String(20), nullable=False, default="processing")
+
+    task_id = Column(String(255), nullable=True)  # ID Celery-задачи
 
     # relationship — НЕ колонка в БД. Это Python-атрибут для удобного доступа.
     # video.detections → список всех Detection для этого видео

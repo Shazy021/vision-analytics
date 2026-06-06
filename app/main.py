@@ -4,19 +4,24 @@
 from fastapi import FastAPI
 from app.api.routes import videos, analytics
 from app.core.database import init_db
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    # Startup
+    try:
+        init_db()
+    except Exception:
+        pass
+    yield
+    # Shutdown (если нужно — добавляем сюда)
 
 app = FastAPI(
     title="Vision Analytics Platform",
     description="API для видеоаналитики — обнаружение, трекинг, статистика",
     version="0.1.0",
+    lifespan=lifespan,
 )
-
-@app.on_event("startup")
-def startup():
-    try:
-        init_db()
-    except Exception:
-        pass  # DB not available (e.g. tests use SQLite)
 
 # Подключаем роутеры — все эндпоинты из videos.py и analytics.py
 # становятся доступны в приложении

@@ -1,23 +1,9 @@
-# docker-compose.yml — оркестратор: поднимает все сервисы одной командой
-#
-# Запуск:      docker-compose up --build
-# Остановка:   docker-compose down
-# С логами:    docker-compose up --build -d && docker-compose logs -f
-#
-# Каждый сервис:
-#   build — откуда брать Dockerfile
-#   ports — проброс портов (хост:контейнер)
-#   environment — переменные окружения
-#   depends_on — зависимости (запускаются раньше)
-#   volumes — проброс файлов с хоста в контейнер
-
 services:
   # ============================================================
   # PostgreSQL — база данных
   # ============================================================
   db:
     image: postgres:16-alpine
-    # alpine — минимальный образ (80MB vs 400MB у полного)
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
@@ -25,13 +11,22 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # pgdata — именованный том, данные БД переживают перезапуск
-      # Без этого — каждый docker-compose down удаляет все данные
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      # healthcheck — Docker ждёт пока БД будет готова
-      # Без этого FastAPI может стартовать раньше PostgreSQL → ошибка подключения
       test: ["CMD-SHELL", "pg_isready -U user -d vision"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Redis — брокер сообщений для Celery
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -41,27 +36,69 @@ services:
   # ============================================================
   api:
     build:
-      context: .              # корень проекта — откуда брать файлы
-      dockerfile: Dockerfile  # какой Dockerfile использовать
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
-      # В Docker сервисы общаются по именам (db, api, dashboard)
-      # Не localhost! db = сервис PostgreSQL в той же Docker-сети
       DATABASE_URL: postgresql://user:pass@db:5432/vision
-      EXTRACT_FPS: 5
-      MAX_FRAMES: 0
-      WEIGHTS_PATH: yolov8n.pt
-      DEVICE: cpu
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
     volumes:
-      # uploads — загруженные видео должны переживать перезапуск
-      # и быть доступны между сервисами
       - ./uploads:/app/uploads
-      # Модели YOLO — качаются один раз, не каждый пересборку
       - ./models_cache:/app/models_cache
     depends_on:
       db:
-        condition: service_healthy  # ждём пока БД пройдёт healthcheck
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ============================================================
+  # Celery Worker — обработка видео (YOLO)
+  # ============================================================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q processing
+    environment:
+      DATABASE_URL: postgresql://user:pass@db:5432/vision
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      DEVICE: 0
+    volumes:
+      - ./uploads:/app/uploads
+      - ./models_cache:/app/models_cache
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ============================================================
+  # Flower — мониторинг Celery
+  # ============================================================
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.core.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
 
   # ============================================================
   # Streamlit — дашборд
@@ -73,11 +110,9 @@ services:
     ports:
       - "8501:8501"
     environment:
-      # Дашборд обращается к API по имени сервиса
       API_URL: http://api:8000
     depends_on:
-      - api  # API должен быть запущен (но не обязательно готов)
+      - api
 
-# Именованные тома
 volumes:
-  pgdata:  # данные PostgreSQL
+  pgdata:

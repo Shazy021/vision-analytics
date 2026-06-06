@@ -2,7 +2,7 @@ import os
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File,  BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -10,7 +10,8 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.db.models import Video, Detection
 from app.schemas.video import VideoCreate, VideoRead
-from app.pipeline.processor import process_video
+from app.tasks.processing import process_video_task
+from app.tasks.processing import process_video_task
 
 router = APIRouter(prefix="/api/videos", tags=["Videos"])
 
@@ -31,21 +32,20 @@ def create_video(video_in: VideoCreate, db: Session = Depends(get_db)):
 
 @router.post("/upload", response_model=VideoRead, status_code=201)
 def upload_video(
-    background_tasks: BackgroundTasks,  # ← FastAPI автоматически передаёт
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
     """
     Загрузить видео-файл и запустить обработку в фоне.
 
-    BackgroundTasks — встроенный механизм FastAPI.
-    Функция добавляется в очередь и выполняется ПОСЛЕ отправки ответа.
+    Celery task — отдельный воркер обрабатывает видео параллельно.
+    API моментально отвечает, не дожидаясь YOLO.
 
     Что происходит:
     1. Сохраняем файл на диск
     2. Создаём запись в БД (status="processing")
-    3. Отправляем ответ клиенту (СРАЗУ!)
-    4. В фоне запускается process_video
+    3. Отправляем задачу в Celery → ответ клиенту (СРАЗУ!)
+    4. Воркер забирает задачу и запускает YOLO
     """
     # Проверяем расширение
     allowed = {".mp4", ".avi", ".mov", ".mkv"}
@@ -71,38 +71,15 @@ def upload_video(
     db.commit()
     db.refresh(video)
 
-    # ============================================================
-    # ФОНОВАЯ ОБРАБОТКА — не блокирует ответ!
-    # ============================================================
-    # Проблема: background_tasks запускается в том же процессе,
-    # но нам нужна своя БД-сессия (сессия запроса уже закроется).
-    # Поэтому передаём video_id, а не db-сессию.
-    background_tasks.add_task(run_processing, video.id)
+    task = process_video_task.delay(video.id)
+    video.task_id = task.id
+    db.commit()
 
     # Считаем detections_count (пока 0)
     video_read = VideoRead.model_validate(video)
     video_read.detections_count = 0
     return video_read
 
-def run_processing(video_id: int) -> None:
-    """
-    Фоновая задача — создаём свою БД-сессию.
-
-    Почему не можем использовать сессию из запроса?
-    Потому что после отправки ответа FastAPI закрывает сессию
-    (finally в get_db). Если бы мы использовали ту же сессию —
-    получили бы "session is closed".
-
-    Поэтому создаём новую сессию специально для фоновой задачи.
-    """
-    from app.core.database import SessionLocal
-    db = SessionLocal()
-    try:
-        process_video(video_id, db)
-    except Exception as e:
-        print(f"Background processing failed for video {video_id}: {e}")
-    finally:
-        db.close()
 
 @router.get("", response_model=list[VideoRead])
 def list_videos(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
@@ -139,3 +116,27 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
     video_read = VideoRead.model_validate(video)
     video_read.detections_count = count
     return video_read
+
+@router.get("/{video_id}/status")
+def get_video_status(video_id: int, db: Session = Depends(get_db)):
+    """
+    Проверить статус обработки видео.
+    
+    Возвращает:
+    - video status из БД (processing / completed / failed)
+    - task status из Celery (PENDING / STARTED / SUCCESS / FAILURE)
+    """
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    result = {"video_id": video_id, "status": video.status}
+
+    # Если есть task_id - проверяем Celery
+    if video.task_id:
+        task = process_video_task.AsyncResult(video.task_id)
+        result["task_status"] = task.status
+        if task.failed():
+            result["error"] = str(task.result)
+
+    return result
