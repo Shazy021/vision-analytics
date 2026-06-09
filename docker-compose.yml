@@ -44,6 +44,7 @@ services:
       DATABASE_URL: postgresql://user:pass@db:5432/vision
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092 
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
@@ -113,6 +114,90 @@ services:
       API_URL: http://api:8000
     depends_on:
       - api
+
+# ============================================================
+  # Kafka — стриминг кадров и детекций
+  # ============================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,HOST://localhost:9092
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,HOST://0.0.0.0:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_LOG_RETENTION_HOURS: 1           # raw_frames — 1 час
+      KAFKA_LOG_RETENTION_BYTES: 1073741824  # 1GB максимум на партицию
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:29092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # ============================================================
+  # YOLO Consumer — обработка кадров из Kafka
+  # ============================================================
+  yolo-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m app.streaming.yolo_consumer yolov8n.pt 0
+    environment:
+      DATABASE_URL: postgresql://user:pass@db:5432/vision
+      DEVICE: "0"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    volumes:
+      - ./uploads:/app/uploads
+      - ./models_cache:/app/models_cache
+    depends_on:
+      kafka:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ============================================================
+  # Detection Consumer — сохранение детекций в БД
+  # ============================================================
+  detection-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m app.streaming.consumer
+    environment:
+      DATABASE_URL: postgresql://user:pass@db:5432/vision
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092 
+    depends_on:
+      kafka:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+        
+  # ============================================================
+  # MediaMTX — RTSP сервер для симуляции камеры
+  # ============================================================
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "8554:8554"   # RTSP
+      - "8889:8889"   # WebRTC (опционально)
+    environment:
+      MTX_RTSP_TRANSPORTS: tcp 
 
 volumes:
   pgdata:

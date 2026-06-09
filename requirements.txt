@@ -26,3 +26,5 @@ httpx==0.27.0
 celery==5.4.0
 redis==5.2.0
 flower==2.0.1
+
+confluent-kafka==2.4.0

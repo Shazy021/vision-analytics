@@ -2,7 +2,7 @@
 Главный файл FastAPI-приложения.
 """
 from fastapi import FastAPI
-from app.api.routes import videos, analytics
+from app.api.routes import videos, analytics, streams
 from app.core.database import init_db
 from contextlib import asynccontextmanager
 
@@ -27,6 +27,7 @@ app = FastAPI(
 # становятся доступны в приложении
 app.include_router(videos.router)
 app.include_router(analytics.router)
+app.include_router(streams.router)
 
 
 @app.get("/health")

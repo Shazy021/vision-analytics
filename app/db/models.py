@@ -53,28 +53,45 @@ class Detection(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    # ForeignKey - внешний ключ: ссылается на videos.id
-    # ondelete="CASCADE" — если видео удаляется, удаляются и его детекции
-    video_id = Column(Integer, ForeignKey("videos.id", ondelete="CASCADE"), nullable=False)
+    video_id = Column(Integer, ForeignKey("videos.id", ondelete="CASCADE"), nullable=True)
+    stream_id = Column(Integer, ForeignKey("streams.id", ondelete="CASCADE"), nullable=True)
 
     frame_index = Column(Integer, nullable=False)
     class_name = Column(String(50), nullable=False)
     confidence = Column(Float, nullable=False)
 
-    # 4 координаты бокса
     bbox_x1 = Column(Float, nullable=False)
     bbox_y1 = Column(Float, nullable=False)
     bbox_x2 = Column(Float, nullable=False)
     bbox_y2 = Column(Float, nullable=False)
 
-    timestamp = Column(Float, nullable=False)
+    # Видео: секунда от начала файла (5.0, 10.5, ...)
+    timestamp = Column(Float, nullable=True)
 
-    # Обратная связь: detection.video -> объект Video
+    # Реальное время детекции — работает И для файлов И для стримов
+    detected_at = Column(DateTime, server_default=func.now(), nullable=False)
+
     video = relationship("Video", back_populates="detections")
+    stream = relationship("Stream", back_populates="detections")
 
     __table_args__ = (
         Index("idx_detections_video_id", "video_id"),
+        Index("idx_detections_stream_id", "stream_id"),
         Index("idx_detections_class", "class_name"),
-        Index("idx_detections_timestamp", "timestamp"),
+        Index("idx_detections_detected_at", "detected_at"),
         Index("idx_detections_video_class", "video_id", "class_name"),
+        Index("idx_detections_stream_class", "stream_id", "class_name"),
     )
+
+class Stream(Base):
+    """Таблица streams - RTSP/IP камеры."""
+    __tablename__ = "streams"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)           # "Парковка камера 1"
+    rtsp_url = Column(String(512), nullable=False)       # rtsp://...
+    status = Column(String(20), nullable=False, default="inactive")  # active/inactive
+    fps = Column(Integer, nullable=True, default=5)      # частота захвата
+    created_at = Column(DateTime, server_default=func.now())
+
+    detections = relationship("Detection", back_populates="stream", cascade="all, delete-orphan")
