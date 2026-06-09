@@ -23,9 +23,12 @@ API_URL = os.environ.get("API_URL", "http://localhost:8000")
 # КЕШИРОВАНИЕ
 # ============================================================
 @st.cache_data(ttl=10)
-def get_stats():
+def get_stats(source=None):
     try:
-        r = requests.get(f"{API_URL}/api/analytics/stats", timeout=5)
+        params = {}
+        if source:
+            params["source"] = source
+        r = requests.get(f"{API_URL}/api/analytics/stats", params=params, timeout=5)
         return r.json() if r.status_code == 200 else None
     except:
         return None
@@ -115,7 +118,7 @@ st.markdown("---")
 # СТРАНИЦА: ВИДЕО
 # ============================================================
 if page == "📹 Видео":
-    stats = get_stats()
+    stats = get_stats(source="video")
     if stats:
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -222,6 +225,19 @@ if page == "📹 Видео":
 # СТРАНИЦА: СТРИМЫ
 # ============================================================
 elif page == "📡 Стримы":
+    # Статистика стримов
+    stream_stats = get_stats(source="stream")
+    if stream_stats:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📡 Всего стримов", len(get_streams()))
+        with col2:
+            st.metric("🎯 Детекций со стримов", stream_stats["total_detections"])
+        with col3:
+            st.metric("📊 Средняя уверенность", f"{stream_stats['avg_confidence']:.1%}")
+        
+    st.markdown("---")
+
     # Автообновление каждые 5 сек
     if "last_refresh" not in st.session_state:
         st.session_state.last_refresh = time.time()

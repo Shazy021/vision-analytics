@@ -12,10 +12,24 @@ router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
 
 
 @router.get("/stats")
-def get_overall_stats(db: Session = Depends(get_db)):
+def get_overall_stats(
+    source: str | None = Query(None, description="Фильтр: 'video' или 'stream'"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(func.count(Detection.id))
+    conf_query = db.query(func.avg(Detection.confidence))
+
+    if source == "video":
+        query = query.filter(Detection.video_id.isnot(None))
+        conf_query = conf_query.filter(Detection.video_id.isnot(None))
+    elif source == "stream":
+        query = query.filter(Detection.stream_id.isnot(None))
+        conf_query = conf_query.filter(Detection.stream_id.isnot(None))
+
+    total_detections = query.scalar()
+    avg_confidence = conf_query.scalar()
+
     total_videos = db.query(func.count(Video.id)).scalar()
-    total_detections = db.query(func.count(Detection.id)).scalar()
-    avg_confidence = db.query(func.avg(Detection.confidence)).scalar()
 
     return {
         "total_videos": total_videos,
