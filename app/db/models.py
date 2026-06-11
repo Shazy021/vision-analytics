@@ -23,6 +23,7 @@ class Video(Base):
     # nullable=False - поле обязательное, нельзя оставлять пустым
     filename = Column(String(255), nullable=False)
     filepath = Column(String(512), nullable=True)
+    object_key = Column(String(512), nullable=True)     # ключ в MinIO (например, "videos/5.mp4")
 
     # nullable=True — поле необязательное (значение может быть NULL)
     duration = Column(Float, nullable=True)

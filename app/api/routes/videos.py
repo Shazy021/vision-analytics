@@ -2,20 +2,20 @@ import os
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core import storage                       # ← MinIO клиент (модуль, не класс)
 from app.db.models import Video, Detection
 from app.schemas.video import VideoCreate, VideoRead
-from app.tasks.processing import process_video_task
 from app.tasks.processing import process_video_task
 
 router = APIRouter(prefix="/api/videos", tags=["Videos"])
 
-# Директория для загруженных видео
+# Директория для загруженных видео (оставляем для совместимости)
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -38,14 +38,12 @@ def upload_video(
     """
     Загрузить видео-файл и запустить обработку в фоне.
 
-    Celery task — отдельный воркер обрабатывает видео параллельно.
-    API моментально отвечает, не дожидаясь YOLO.
-
-    Что происходит:
-    1. Сохраняем файл на диск
-    2. Создаём запись в БД (status="processing")
-    3. Отправляем задачу в Celery → ответ клиенту (СРАЗУ!)
-    4. Воркер забирает задачу и запускает YOLO
+    Flow:
+    1. Создаём запись в БД (нужен ID для ключа в MinIO)
+    2. Сохраняем временный файл → загружаем в MinIO через fput_object (multipart)
+    3. Удаляем временный файл
+    4. Отправляем задачу в Celery → ответ клиенту (СРАЗУ!)
+    5. Воркер читает видео НАПРЯМУЮ из MinIO по HTTP (без скачивания)
     """
     # Проверяем расширение
     allowed = {".mp4", ".avi", ".mov", ".mkv"}
@@ -56,26 +54,36 @@ def upload_video(
             detail=f"File type {ext} not allowed. Allowed: {allowed}"
         )
 
-    # Сохраняем файл
-    filepath = UPLOAD_DIR / file.filename
-    with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    # Создаём запись в БД
+    # Создаём запись в БД СНАЧАЛА (нужен ID для ключа)
     video = Video(
         filename=file.filename,
-        filepath=str(filepath),
         status="processing",
     )
     db.add(video)
     db.commit()
     db.refresh(video)
 
+    # Сохраняем на диск временно → fput_object (multipart upload для больших файлов)
+    # Для 7GB файла upload_bytes() убьёт RAM, а fput_object() льёт частями
+    temp_path = UPLOAD_DIR / f"{video.id}{ext}"
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    object_key = f"videos/{video.id}{ext}"
+    storage.upload_file(object_key, str(temp_path), content_type="video/mp4")
+
+    # Удаляем временный файл — он в MinIO
+    os.remove(temp_path)
+
+    # Сохраняем S3 ключ в БД
+    video.object_key = object_key
+    db.commit()
+
+    # Отправляем задачу Celery
     task = process_video_task.delay(video.id)
     video.task_id = task.id
     db.commit()
 
-    # Считаем detections_count (пока 0)
     video_read = VideoRead.model_validate(video)
     video_read.detections_count = 0
     return video_read
@@ -104,7 +112,7 @@ def list_videos(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
 
 @router.get("/{video_id}", response_model=VideoRead)
 def get_video(video_id: int, db: Session = Depends(get_db)):
-    """Получить одно видео по ID"""
+    """Получить одно видео по ID + presigned URL для просмотра"""
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -115,24 +123,26 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
 
     video_read = VideoRead.model_validate(video)
     video_read.detections_count = count
+
+    # Presigned URL — дашборд может открыть видео напрямую из MinIO
+    if video.object_key:
+        try:
+            video_read.video_url = storage.get_presigned_url(video.object_key)
+        except Exception:
+            pass  # MinIO недоступен — без URL
+
     return video_read
+
 
 @router.get("/{video_id}/status")
 def get_video_status(video_id: int, db: Session = Depends(get_db)):
-    """
-    Проверить статус обработки видео.
-    
-    Возвращает:
-    - video status из БД (processing / completed / failed)
-    - task status из Celery (PENDING / STARTED / SUCCESS / FAILURE)
-    """
+    """Проверить статус обработки видео."""
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    
+
     result = {"video_id": video_id, "status": video.status}
 
-    # Если есть task_id - проверяем Celery
     if video.task_id:
         task = process_video_task.AsyncResult(video.task_id)
         result["task_status"] = task.status
@@ -140,3 +150,51 @@ def get_video_status(video_id: int, db: Session = Depends(get_db)):
             result["error"] = str(task.result)
 
     return result
+
+
+@router.get("/{video_id}/frame")
+def get_video_frame(video_id: int, timestamp: float, db: Session = Depends(get_db)):
+    """
+    Получить кадр из видео по таймстампу.
+
+    У нас есть целое видео в MinIO + timestamp детекции в БД.
+    Достаём кадр из видео по времени, боксы подставим из БД на фронте.
+    """
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if not video.object_key:
+        raise HTTPException(status_code=404, detail="Video file not in S3")
+
+    # Возвращаем presigned URL на само видео + timestamp
+    # Фронт сам откроет видео на нужной секунде
+    try:
+        video_url = storage.get_presigned_url(video.object_key)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to generate video URL")
+
+    return {
+        "video_id": video_id,
+        "timestamp": timestamp,
+        "video_url": video_url,
+    }
+
+
+@router.delete("/{video_id}")
+def delete_video(video_id: int, db: Session = Depends(get_db)):
+    """Удалить видео + файлы из S3 + детекции из БД"""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Удаляем видео из S3
+    if video.object_key:
+        storage.delete_file(video.object_key)
+
+    # Удаляем детекции + видео из БД
+    db.query(Detection).filter(Detection.video_id == video_id).delete()
+    db.delete(video)
+    db.commit()
+
+    return {"message": f"Video {video_id} deleted"}

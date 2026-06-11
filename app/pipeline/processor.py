@@ -3,11 +3,9 @@
 
 Видео → кадры → YOLO-детекция → сохранение в БД
 
-Это "оркестратор" — он не делает саму работу,
-а координирует работу других модулей:
-- VideoCapture / frame_generator — извлечение кадров
-- YOLODetector — обнаружение объектов
-- БД — сохранение результатов
+Phase 4: Видео читается НАПРЯМУЮ из MinIO по HTTP.
+OpenCV (cv2.VideoCapture) поддерживает HTTP URL —
+никакого скачивания на диск.
 """
 import os
 from pathlib import Path
@@ -15,25 +13,43 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core import storage
 from app.db.models import Video, Detection
 from app.detection.yolo import YOLODetector
 from app.video.extractor import VideoCapture
+
+
+def _get_video_source(video: Video) -> str:
+    """
+    Получить источник видео для OpenCV.
+
+    Если есть object_key — генерируем presigned URL,
+    OpenCV читает по HTTP напрямую из MinIO.
+    Если нет — используем старый filepath с диска.
+    """
+    if video.object_key:
+        url = storage.get_presigned_url(video.object_key, expires_hours=24)
+        print(f"[Processor] Reading {video.object_key} directly from MinIO via HTTP")
+        return url
+
+    if video.filepath and Path(video.filepath).exists():
+        print(f"[Processor] Reading from local disk: {video.filepath}")
+        return video.filepath
+
+    raise FileNotFoundError(
+        f"Video file not found: object_key={video.object_key}, filepath={video.filepath}"
+    )
+
 
 def process_video(video_id: int, db: Session) -> None:
     """
     Обработать видео: кадры → детекции → БД.
 
-    video_id — ID записи в таблице videos
-    db — SQLAlchemy-сессия (передаём извне, чтобы управлять транзакцией)
+    Видео читается НАПРЯМУЮ из MinIO по HTTP — никакого скачивания.
+    OpenCV (через FFmpeg) стримит кадры по сети.
 
-    Шаги:
-    1. Находим видео в БД по ID
-    2. Ставим статус "processing"
-    3. Открываем видео, извлекаем кадры
-    4. Каждый кадр прогоняем через YOLO
-    5. Сохраняем все детекции в БД
-    6. Обновляем метаданные видео (duration, fps)
-    7. Ставим статус "completed"
+    Кадры НЕ сохраняем — у нас есть целое видео в MinIO,
+    а у детекций есть timestamp. Кадр можно достать по таймстампу.
     """
     # ============================================================
     # Шаг 1: Находим видео в БД
@@ -42,15 +58,13 @@ def process_video(video_id: int, db: Session) -> None:
     if not video:
         raise ValueError(f"Video with id={video_id} not found")
 
-    filepath = video.filepath
-
-    if not filepath or not Path(filepath).exists():
-        video.status = "failed"
-        db.commit()
-        raise FileNotFoundError(f"Video file not found: {filepath}")
-    
     # ============================================================
-    # Шаг 2: Ставим статус "processing"
+    # Шаг 2: Получаем источник видео (URL или путь)
+    # ============================================================
+    video_source = _get_video_source(video)
+
+    # ============================================================
+    # Шаг 3: Ставим статус "processing"
     # ============================================================
     db.query(Detection).filter(Detection.video_id == video_id).delete()
     video.status = "processing"
@@ -58,12 +72,12 @@ def process_video(video_id: int, db: Session) -> None:
 
     try:
         # ============================================================
-        # Шаг 3-4: Извлекаем кадры и детектируем объекты
+        # Шаг 4-5: Извлекаем кадры и детектируем объекты
         # ============================================================
         detector = YOLODetector()
         all_detections = []
 
-        with VideoCapture(filepath) as cap:
+        with VideoCapture(video_source) as cap:
             frame_index = 0
             fps = cap.get(5)
             total_frames = int(cap.get(7))
@@ -72,7 +86,6 @@ def process_video(video_id: int, db: Session) -> None:
             extract_fps = settings.extract_fps
             step = max(1, int(fps / extract_fps)) if fps > 0 else 1
 
-            # Сколько кадров будем обрабатывать (для оценки)
             frames_to_process = total_frames // step
             print(f"Video: {total_frames} frames, {fps} fps, "
                   f"extracting every {step}th = ~{frames_to_process} frames to process")
@@ -85,7 +98,6 @@ def process_video(video_id: int, db: Session) -> None:
                 if frame_index % step == 0:
                     timestamp = frame_index / fps if fps > 0 else 0.0
 
-                    # Логируем прогресс каждые 50 обработанных кадров
                     processed = frame_index // step
                     if processed % 50 == 0:
                         print(f"Processing frame {frame_index}/{total_frames} "
@@ -100,19 +112,18 @@ def process_video(video_id: int, db: Session) -> None:
 
                 frame_index += 1
 
-                # Ограничение для тестов (0 = без лимита)
                 if settings.max_frames > 0 and frame_index >= settings.max_frames:
                     print(f"Reached max_frames limit ({settings.max_frames}), stopping")
                     break
-    
+
         # ============================================================
-        # Шаг 5: Сохраняем детекции в БД
+        # Шаг 6: Сохраняем детекции в БД
         # ============================================================
         for det in all_detections:
             db_detection = Detection(
-                video_id = video.id,
-                class_name = det.class_name,
-                confidence = det.confidence,
+                video_id=video.id,
+                class_name=det.class_name,
+                confidence=det.confidence,
                 bbox_x1=det.bbox[0],
                 bbox_y1=det.bbox[1],
                 bbox_x2=det.bbox[2],
@@ -121,15 +132,15 @@ def process_video(video_id: int, db: Session) -> None:
                 timestamp=det.timestamp,
             )
             db.add(db_detection)
-        
+
         # ============================================================
-        # Шаг 6: Обновляем метаданные видео
+        # Шаг 7: Обновляем метаданные видео
         # ============================================================
         video.duration = duration
         video.fps = int(fps) if fps > 0 else None
 
         # ============================================================
-        # Шаг 7: Ставим статус "completed"
+        # Шаг 8: Ставим статус "completed"
         # ============================================================
         video.status = "completed"
         db.commit()
@@ -137,7 +148,6 @@ def process_video(video_id: int, db: Session) -> None:
         print(f"Processed video {video_id}: {len(all_detections)} detections found")
 
     except Exception as e:
-        # Если что-то пошло не так — помечаем как failed
         video.status = "failed"
         db.commit()
         raise

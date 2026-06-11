@@ -4,6 +4,7 @@ import threading
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.core.database import SessionLocal
+from app.core import storage
 from app.db.models import Stream, Detection
 
 router = APIRouter(prefix="/api/streams", tags=["streams"])
@@ -91,6 +92,9 @@ def delete_stream(stream_id: int):
         if stream_id in _running_processes:
             _running_processes[stream_id].terminate()
             del _running_processes[stream_id]
+        # Удаляем кадры стрима из S3
+        storage.delete_prefix(f"streams/{stream_id}/")
+
         db.delete(stream)
         db.commit()
         return {"deleted": True}
@@ -153,6 +157,34 @@ def stop_stream(stream_id: int):
     finally:
         db.close()
 
+
+
+
+@router.get("/{stream_id}/frames/{frame_index}")
+def get_stream_frame(stream_id: int, frame_index: int):
+    """
+    Получить чистый кадр стрима из MinIO.
+
+    YOLO Consumer сохраняет кадры (только с детекциями) по ключу:
+    streams/{stream_id}/{frame_index}.jpg
+
+    Фронт получает чистый кадр + боксы из /detections и рисует сам.
+    """
+    frame_key = f"streams/{stream_id}/{frame_index}.jpg"
+
+    if not storage.file_exists(frame_key):
+        raise HTTPException(status_code=404, detail="Frame not found in S3")
+
+    try:
+        url = storage.get_presigned_url(frame_key)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to generate frame URL")
+
+    return {
+        "stream_id": stream_id,
+        "frame_index": frame_index,
+        "frame_url": url,
+    }
 
 @router.get("/{stream_id}/detections")
 def stream_detections(stream_id: int, limit: int = 100):

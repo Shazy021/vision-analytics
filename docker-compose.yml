@@ -44,7 +44,11 @@ services:
       DATABASE_URL: postgresql://user:pass@db:5432/vision
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092 
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      S3_ENDPOINT: http://minio:9000          # ← добавить
+      S3_ACCESS_KEY: minioadmin                # ← добавить
+      S3_SECRET_KEY: minioadmin123             # ← добавить
+      S3_BUCKET: vision  
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
@@ -52,6 +56,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   # ============================================================
@@ -67,6 +73,10 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       DEVICE: 0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin123
+      S3_BUCKET: vision
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
@@ -74,6 +84,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     deploy:
       replicas: 2
@@ -155,6 +167,10 @@ services:
       DATABASE_URL: postgresql://user:pass@db:5432/vision
       DEVICE: "0"
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin123
+      S3_BUCKET: vision
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
@@ -162,6 +178,8 @@ services:
       kafka:
         condition: service_healthy
       db:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     deploy:
       resources:
@@ -197,7 +215,28 @@ services:
       - "8554:8554"   # RTSP
       - "8889:8889"   # WebRTC (опционально)
     environment:
-      MTX_RTSP_TRANSPORTS: tcp 
+      MTX_RTSP_TRANSPORTS: tcp
+  
+  # ============================================================
+  # MinIO — S3-совместимое хранилище файлов
+  # ============================================================
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"     # S3 API
+      - "9001:9001"     # Web Console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pgdata:
+  minio_data:

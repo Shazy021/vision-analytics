@@ -17,6 +17,7 @@ class VideoBase(BaseModel):
     """Поля, общие для создания и чтения видео"""
     filename: str
     filepath: str | None = None
+    object_key: str | None = None # ключ в MinIO (например, "videos/5.mp4")
     duration: float | None = None
     fps: int | None = None
     resolution: str | None = None
@@ -45,6 +46,7 @@ class VideoRead(VideoBase):
     status: str
     uploaded_at: datetime | None = None
     detections_count: int = 0  # количество детекций, считаем отдельным запросом
+    video_url: str | None = None # URL для просмотра из MinIO
 
     # ConfigDict — настройка Pydantic
     # from_attributes=True — разрешает читать данные из SQLAlchemy-объектов

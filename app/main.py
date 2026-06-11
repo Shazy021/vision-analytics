@@ -6,6 +6,7 @@ from app.api.routes import videos, analytics, streams
 from app.core.database import init_db
 from contextlib import asynccontextmanager
 
+
 @asynccontextmanager
 async def lifespan(app):
     # Startup
@@ -13,6 +14,20 @@ async def lifespan(app):
         init_db()
     except Exception:
         pass
+
+    # Создаём бакет в MinIO, если его ещё нет
+    # + устанавливаем TTL для кадров стримов (автоудаление через N дней)
+    try:
+        from app.core import storage
+        storage.ensure_bucket()
+        # Кадры стримов старше 7 дней будут удалены автоматически.
+        # Это спасает диск от переполнения: 1 стрим = ~24 GB/день.
+        # Видео (videos/) НЕ затрагиваются — они загружены пользователем.
+        storage.set_stream_frames_ttl(days=7)
+        print("[Startup] MinIO bucket ready + stream frames TTL=7d")
+    except Exception as e:
+        print(f"[Startup] MinIO not available yet: {e}")
+
     yield
     # Shutdown (если нужно — добавляем сюда)
 

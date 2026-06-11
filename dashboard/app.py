@@ -193,6 +193,20 @@ if page == "📹 Видео":
                     st.write(f"**Детекций:** {v['detections_count']}")
                 with c3:
                     st.write(f"**Загружено:** {v['uploaded_at'][:19] if v['uploaded_at'] else 'N/A'}")
+
+                # Кнопка удаления
+                if st.button("🗑 Удалить", key=f"del_video_{v['id']}"):
+                    try:
+                        r = requests.delete(f"{API_URL}/api/videos/{v['id']}", timeout=10)
+                        if r.status_code == 200:
+                            st.success(f"✅ Видео #{v['id']} удалено")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Ошибка: {r.json().get('detail', 'Не удалось удалить')}")
+                    except Exception as e:
+                        st.error(f"❌ {e}")
     else:
         st.info("Пока нет загруженных видео. Загрузите через форму ниже 👇")
 
