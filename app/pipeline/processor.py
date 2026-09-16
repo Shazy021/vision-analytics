@@ -90,6 +90,8 @@ def process_video(video_id: int, db: Session) -> None:
             print(f"Video: {total_frames} frames, {fps} fps, "
                   f"extracting every {step}th = ~{frames_to_process} frames to process")
 
+            hit_limit = False
+
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -114,6 +116,7 @@ def process_video(video_id: int, db: Session) -> None:
 
                 if settings.max_frames > 0 and frame_index >= settings.max_frames:
                     print(f"Reached max_frames limit ({settings.max_frames}), stopping")
+                    hit_limit = True
                     break
 
         # ============================================================
@@ -142,7 +145,7 @@ def process_video(video_id: int, db: Session) -> None:
         # ============================================================
         # Шаг 8: Ставим статус "completed"
         # ============================================================
-        video.status = "completed"
+        video.status = "partial" if hit_limit else "completed"
         db.commit()
 
         print(f"Processed video {video_id}: {len(all_detections)} detections found")
