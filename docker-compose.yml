@@ -67,7 +67,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q processing
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q processing -E
     environment:
       DATABASE_URL: postgresql://user:pass@db:5432/vision
       CELERY_BROKER_URL: redis://redis:6379/0
