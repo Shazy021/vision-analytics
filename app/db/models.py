@@ -94,5 +94,6 @@ class Stream(Base):
     status = Column(String(20), nullable=False, default="inactive")  # active/inactive
     fps = Column(Integer, nullable=True, default=5)      # частота захвата
     created_at = Column(DateTime, server_default=func.now())
+    pid = Column(Integer, nullable=True)
 
     detections = relationship("Detection", back_populates="stream", cascade="all, delete-orphan")
