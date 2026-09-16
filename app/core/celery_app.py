@@ -14,6 +14,7 @@ celery_app = Celery(
     "vision_analytics",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
+    include=["app.tasks.processing"],
 )
 
 celery_app.conf.update(
@@ -22,11 +23,5 @@ celery_app.conf.update(
     result_serializer = "json",
     timezone = "UTC",
     enable_utc=True,
+    broker_connection_retry_on_startup=True,
 )
-
-@celery_app.task
-def add(x, y):
-    """Простая задача для проверки что Celery работает."""
-    return x + y
-
-import app.tasks.processing  # noqa: E402, F401
