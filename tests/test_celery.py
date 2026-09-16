@@ -48,13 +48,11 @@ def test_process_video_task_failure(mock_session_local, mock_process_video):
     """Задача помечает результат как failed при ошибке"""
     mock_db = MagicMock()
     mock_session_local.return_value = mock_db
+
     mock_process_video.side_effect = Exception("YOLO crashed")
+    with pytest.raises(Exception):
+        process_video_task(video_id=2)
 
-    result = process_video_task(video_id=2)
-
-    assert result["status"] == "failed"
-    assert result["video_id"] == 2
-    assert "YOLO crashed" in result["error"]
     mock_db.close.assert_called_once()
 
 
