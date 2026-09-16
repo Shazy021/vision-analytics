@@ -2,7 +2,7 @@
 import json
 import pytest
 from unittest.mock import MagicMock, patch, call
-
+from app.streaming.yolo_consumer import YOLOConsumer
 
 # ---- Тесты FrameProducer ----
 
@@ -93,6 +93,40 @@ class TestYOLOConsumer:
         deserialized = json.loads(serialized.decode())
         assert deserialized == detection_msg
 
+    def _make_consumer(self):
+        """Consumer без __init__ — без Kafka, без YOLO, без сети.
+        __new__ создаёт объект, не вызывая конструктор. Обычный трюк
+        для тестирования классов с тяжёлой инициализацией."""
+        c = YOLOConsumer.__new__(YOLOConsumer)
+        c.model = MagicMock()
+        c.device = "cpu"
+        c.producer = MagicMock()
+        c.consumer = MagicMock()
+        return c
+
+    def test_poison_message_is_skipped_not_fatal(self):
+        consumer = self._make_consumer()
+
+        bad_msg = MagicMock()
+        bad_msg.value.return_value = b"not json at all"
+        bad_msg.error.return_value = None                  # ВАЖНО: без этого
+            # msg.error() вернёт MagicMock — а это truthy, и мы уйдём в ветку
+            # "Kafka error: continue", не дойдя до _handle. Классическая ловушка.
+        bad_msg.topic.return_value = "raw_frames"
+        bad_msg.offset.return_value = 42
+
+        def fake_poll(timeout):
+            if not fake_poll.called:
+                fake_poll.called = True
+                return bad_msg
+            raise KeyboardInterrupt
+
+        fake_poll.called = False
+        consumer.consumer.poll.side_effect = fake_poll
+
+        consumer.run()
+
+        assert consumer.poison_count == 1
 
 # ---- Тесты DetectionConsumer ----
 

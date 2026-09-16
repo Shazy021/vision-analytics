@@ -9,13 +9,17 @@ Phase 4: Сохраняем ЧИСТЫЕ кадры со стримов в MinIO
 import json
 import base64
 import numpy as np
+import logging
 import cv2
 from confluent_kafka import Consumer, Producer
+from app.core.config import settings
 from app.streaming.topics import (
     KAFKA_BOOTSTRAP_SERVERS,
     TOPIC_RAW_FRAMES,
     TOPIC_DETECTIONS,
 )
+
+logger = logging.getLogger(__name__)
 
 # Импортируем storage один раз при загрузке модуля.
 # Если MinIO недоступен — упадёт сразу с понятной ошибкой,
@@ -23,21 +27,21 @@ from app.streaming.topics import (
 try:
     from app.core import storage
     MINIO_AVAILABLE = True
-    print("[YOLO Consumer] MinIO storage connected")
+    logger.info("[YOLO Consumer] MinIO storage connected")
 except Exception as e:
     storage = None
     MINIO_AVAILABLE = False
-    print(f"[YOLO Consumer] WARNING: MinIO not available: {e}")
-    print("[YOLO Consumer] Stream frames will NOT be saved!")
+    logger.error("[YOLO Consumer] WARNING: MinIO not available: %s", e)
+    logger.error("[YOLO Consumer] Stream frames will NOT be saved!")
 
 
 class YOLOConsumer:
     """Читает raw_frames → YOLO → пишет в detections + сохраняет кадры в MinIO"""
 
-    def __init__(self, model_path: str = "yolov8n.pt", device: str = "0"):
+    def __init__(self, model_path: str | None = None, device: str | None = None):
         from ultralytics import YOLO
-        self.model = YOLO(model_path)
-        self.device = device
+        self.model = YOLO(model_path or settings.weights_path)
+        self.device = device or settings.device
 
         self.consumer = Consumer({
             "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
@@ -59,17 +63,21 @@ class YOLOConsumer:
         try:
             frame_key = f"streams/{stream_id}/{frame_index}.jpg"
             storage.upload_bytes(frame_key, frame_data, content_type="image/jpeg")
+            return True
         except Exception as e:
             # Логируем но не падаем — кадры не критичны
-            print(f"[YOLO Consumer] Failed to save frame to MinIO: {e}")
+            logger.exception("[YOLO Consumer] Failed to save frame to MinIO")
             # MinIO мог отвалиться — пробуем реконнект при следующем кадре
+            return False
 
     def run(self):
-        print(f"YOLO consumer listening to '{TOPIC_RAW_FRAMES}'...")
+        logger.info("YOLO consumer listening to '%s'...", TOPIC_RAW_FRAMES)
         if MINIO_AVAILABLE:
-            print("[YOLO Consumer] Stream frames WILL be saved to MinIO")
+            logger.info("[YOLO Consumer] Stream frames WILL be saved to MinIO")
         else:
-            print("[YOLO Consumer] Stream frames will NOT be saved (MinIO unavailable)")
+            logger.info("[YOLO Consumer] Stream frames will NOT be saved (MinIO unavailable)")
+
+        self.poison_count = 0
 
         try:
             while True:
@@ -77,64 +85,78 @@ class YOLOConsumer:
                 if msg is None:
                     continue
                 if msg.error():
-                    print(f"Consumer error: {msg.error()}")
+                    logger.error("Consumer error: %s", msg.error())
                     continue
 
-                data = json.loads(msg.value().decode())
-
-                # Декодируем кадр
-                frame_bytes = base64.b64decode(data["frame_data"])
-                frame = cv2.imdecode(
-                    np.frombuffer(frame_bytes, dtype=np.uint8),
-                    cv2.IMREAD_COLOR,
-                )
-
-                # YOLO
-                results = self.model(frame, device=self.device, verbose=False)[0]
-
-                objects = []
-                for box in results.boxes:
-                    obj = {
-                        "class": self.model.names[int(box.cls)],
-                        "confidence": float(box.conf),
-                        "bbox": {
-                            "x1": float(box.xyxy[0][0]),
-                            "y1": float(box.xyxy[0][1]),
-                            "x2": float(box.xyxy[0][2]),
-                            "y2": float(box.xyxy[0][3]),
-                        },
-                    }
-                    objects.append(obj)
-
-                # Сохраняем чистый кадр в MinIO (ТОЛЬКО если есть детекции)
-                stream_id = data.get("stream_id")
-                saved = False
-                if stream_id and len(objects) > 0:
-                    saved = self._save_frame_to_minio(
-                        stream_id=stream_id,
-                        frame_index=data["frame_index"],
-                        frame_data=frame_bytes,
+                try:
+                    self._handle(msg)
+                except Exception:
+                    self.poison_count += 1
+                    logger.exception(
+                        "Poison message skipped: topic=%s offset=%s (total %d)",
+                        msg.topic(), msg.offset(), self.poison_count,
                     )
 
-                detection_msg = json.dumps({
-                    "video_id": None,
-                    "stream_id": stream_id,
-                    "frame_index": data["frame_index"],
-                    "source": data["source"],
-                    "objects": objects,
-                    "num_detections": len(objects),
-                }).encode()
-
-                self.producer.produce(TOPIC_DETECTIONS, value=detection_msg)
-                self.producer.poll(0)
-                print(f"Frame #{data['frame_index']}: {len(objects)} detections"
-                      + (" → saved to MinIO" if saved else ""))
-
         except KeyboardInterrupt:
-            print("\nStopping...")
+            logger.info("Stopping...")
         finally:
             self.consumer.close()
             self.producer.flush()
+
+    def _handle(self, msg):
+        data = json.loads(msg.value().decode())
+
+        # Декодируем кадр
+        frame_bytes = base64.b64decode(data["frame_data"])
+        frame = cv2.imdecode(
+            np.frombuffer(frame_bytes, dtype=np.uint8),
+            cv2.IMREAD_COLOR,
+        )
+
+        # YOLO
+        results = self.model(frame, device=self.device, verbose=False)[0]
+
+        objects = []
+        for box in results.boxes:
+            obj = {
+                "class": self.model.names[int(box.cls)],
+                "confidence": float(box.conf),
+                "bbox": {
+                    "x1": float(box.xyxy[0][0]),
+                    "y1": float(box.xyxy[0][1]),
+                    "x2": float(box.xyxy[0][2]),
+                    "y2": float(box.xyxy[0][3]),
+                },
+            }
+            objects.append(obj)
+
+        # Сохраняем чистый кадр в MinIO (ТОЛЬКО если есть детекции)
+        stream_id = data.get("stream_id")
+        saved = False
+        if stream_id and len(objects) > 0:
+            saved = self._save_frame_to_minio(
+                stream_id=stream_id,
+                frame_index=data["frame_index"],
+                frame_data=frame_bytes,
+            )
+
+        detection_msg = json.dumps({
+            "video_id": None,
+            "stream_id": stream_id,
+            "frame_index": data["frame_index"],
+            "source": data["source"],
+            "objects": objects,
+            "num_detections": len(objects),
+        }).encode()
+
+        self.producer.produce(TOPIC_DETECTIONS, value=detection_msg)
+        self.producer.poll(0)
+        logger.debug(
+            "Frame #%s: %s detections%s",
+            data["frame_index"],
+            len(objects),
+            " → saved to MinIO" if saved else "",
+        )
 
 
 if __name__ == "__main__":
