@@ -1,7 +1,7 @@
 """Тесты для Kafka streaming модуля"""
 import json
-import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
+
 from app.streaming.yolo_consumer import YOLOConsumer
 
 # ---- Тесты FrameProducer ----
@@ -16,13 +16,18 @@ class TestFrameProducer:
             mock_producer = MagicMock()
             mock_producer_cls.return_value = mock_producer
 
+            from app.core.config import settings
             from app.streaming.producer import FrameProducer
-            producer = FrameProducer("test.mp4", fps=2)
+            FrameProducer("test.mp4", fps=2)
 
-            # Проверяем что Producer создан с правильными параметрами
+            # Проверяем что Producer создан с правильными параметрами.
+            # Сверяемся с settings, а не с хардкодом: .env для локального
+            # запуска и для compose задают разные адреса Kafka
+            # (localhost:9092 vs kafka:29092) — контракт в том, что адрес
+            # ВСЕГДА берётся из настроек
             mock_producer_cls.assert_called_once()
             call_kwargs = mock_producer_cls.call_args[0][0]
-            assert call_kwargs["bootstrap.servers"] == "localhost:9092"
+            assert call_kwargs["bootstrap.servers"] == settings.kafka_bootstrap_servers
 
     def test_producer_has_delivery_report(self):
         """Проверяем что callback для ошибок определён"""
@@ -202,11 +207,12 @@ class TestTopics:
 
     def test_topic_names(self):
         """Проверяем имена топиков"""
-        from app.streaming.topics import TOPIC_RAW_FRAMES, TOPIC_DETECTIONS
+        from app.streaming.topics import TOPIC_DETECTIONS, TOPIC_RAW_FRAMES
         assert TOPIC_RAW_FRAMES == "raw_frames"
         assert TOPIC_DETECTIONS == "detections"
 
     def test_bootstrap_servers(self):
-        """Проверяем адрес Kafka"""
+        """Адрес Kafka приходит из настроек (KAFKA_BOOTSTRAP_SERVERS в .env/compose)"""
+        from app.core.config import settings
         from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS
-        assert KAFKA_BOOTSTRAP_SERVERS == "localhost:9092"
+        assert KAFKA_BOOTSTRAP_SERVERS == settings.kafka_bootstrap_servers
