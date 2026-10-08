@@ -7,7 +7,7 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 COPY requirements.txt .
 RUN pip install -r requirements.txt && \
     pip uninstall -y opencv-python opencv-python-headless && \
-    pip install --no-cache-dir opencv-python-headless
+    pip install --no-cache-dir opencv-python-headless==4.13.0.92
 
 FROM python:3.12-slim
 

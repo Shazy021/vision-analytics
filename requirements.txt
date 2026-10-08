@@ -11,8 +11,11 @@ psycopg2-binary==2.9.9
 alembic==1.13.2
 
 # --- Компьютерное зрение ---
-ultralytics==8.3.0
-opencv-python-headless==4.10.0.82
+ultralytics==8.4.115
+# 4.13.0.92, НЕ 4.10.0.82/4.13.0.90: 4.10.x — колёса под ABI NumPy 1.x (падают
+# с numpy 2.x), 4.13.0.90 — тянет системный libxcb.so.1 (нет в slim-образах),
+# 4.13.0.92 — обе проблемы починены (см. комментарий в requirements.cpu.txt)
+opencv-python-headless==4.13.0.92
 
 # --- Дашборд ---
 streamlit==1.38.0
