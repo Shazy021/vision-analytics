@@ -1,3 +1,21 @@
+# ============================================================
+# Vision Analytics Platform — Docker Compose
+#
+# Все секреты и хосты подставляются из переменных окружения:
+# compose читает их из файла .env в корне проекта (см. .env.example).
+# Формат ${VAR:-default} = взять VAR из .env, а если его нет — дефолт.
+# Дефолты безопасны для локальной разработки и НЕ содержат реальных секретов.
+#
+# GPU: базовый файл работает на ЛЮБОЙ машине — GPU-резервы вынесены в
+# docker-compose.gpu.yml. На NVIDIA-машине подключи его вручную или используй
+# make up (Makefile сам определит GPU по nvidia-smi и добавит override-файл).
+#
+# ОБРАЗЫ (vap = Vision Analytics Platform):
+#   vap-cuda — torch+CUDA, только worker и yolo-consumer (инференс, ~10-11 GB)
+#   vap-cpu  — без torch: api, flower, detection-consumer, dashboard (~2 GB)
+# Оба строятся один раз: сервисы с одинаковыми build+image делят один образ.
+# ============================================================
+
 services:
   # ============================================================
   # PostgreSQL — база данных
@@ -5,15 +23,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: pass
-      POSTGRES_DB: vision
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pass}
+      POSTGRES_DB: ${POSTGRES_DB:-vision}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d vision"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-vision}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -37,18 +55,19 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.cpu
+    image: vap-cpu:latest
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://user:pass@db:5432/vision
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      S3_ENDPOINT: http://minio:9000          # ← добавить
-      S3_ACCESS_KEY: minioadmin                # ← добавить
-      S3_SECRET_KEY: minioadmin123             # ← добавить
-      S3_BUCKET: vision  
+      DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin123}
+      S3_BUCKET: ${S3_BUCKET:-vision}
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
@@ -67,16 +86,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q processing -E
+    image: vap-cuda:latest
+    # --pool=solo (без форка): CUDA-контекст не переживает fork(), а дефолтный
+    # prefork-пул Celery как раз форкает дочерние процессы → RuntimeError
+    # "Cannot re-initialize CUDA in forked subprocess". В solo задачи выполняются
+    # прямо в главном процессе. Параллелизм даём replicas: 2 — два независимых
+    # контейнера (каждый грузит модель в VRAM; мало памяти — поставь 1).
+    command: celery -A app.core.celery_app worker --loglevel=info --pool=solo -Q processing -E
     environment:
-      DATABASE_URL: postgresql://user:pass@db:5432/vision
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      DEVICE: 0
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin123
-      S3_BUCKET: vision
+      DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      DEVICE: ${DEVICE:-auto}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin123}
+      S3_BUCKET: ${S3_BUCKET:-vision}
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
@@ -89,12 +114,6 @@ services:
         condition: service_healthy
     deploy:
       replicas: 2
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   # ============================================================
   # Flower — мониторинг Celery
@@ -102,13 +121,14 @@ services:
   flower:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.cpu
+    image: vap-cpu:latest
     command: celery -A app.core.celery_app flower --port=5555
     ports:
       - "5555:5555"
     environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
     depends_on:
       redis:
         condition: service_healthy
@@ -120,10 +140,12 @@ services:
     build:
       context: .
       dockerfile: dashboard/Dockerfile
+    image: vap-cpu:latest
+    command: streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
     ports:
       - "8501:8501"
     environment:
-      API_URL: http://api:8000
+      API_URL: ${API_URL:-http://api:8000}
     depends_on:
       - api
 
@@ -156,38 +178,66 @@ services:
       retries: 5
 
   # ============================================================
+  # Kafka Init — явное создание топиков (разовый контейнер)
+  #
+  # Зачем: консьюмер НЕ умеет создавать топик — при подписке на несуществующий
+  # raw_frames он циклично логирует "Broker: Unknown topic or partition",
+  # пока первый продюсер не триггерит авто-создание. Создаём топики сами
+  # до старта консьюмеров — чистые логи и предсказуемый конфиг (прод-практика).
+  # retention задан per-topic (приоритетнее глобального KAFKA_LOG_RETENTION_*).
+  # ============================================================
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    command: >
+      bash -c "
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
+      --topic raw_frames --partitions 3 --replication-factor 1
+      --config retention.ms=3600000
+      &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
+      --topic detections --partitions 1 --replication-factor 1
+      --config retention.ms=86400000
+      &&
+      echo '--- Kafka topics ready ---'
+      && kafka-topics --bootstrap-server kafka:29092 --list
+      "
+
+  # ============================================================
   # YOLO Consumer — обработка кадров из Kafka
   # ============================================================
   yolo-consumer:
+    # Тот же CUDA-образ, что у worker (build + image совпадают — один билд)
     build:
       context: .
       dockerfile: Dockerfile
-    command: python -m app.streaming.yolo_consumer yolov8n.pt 0
+    image: vap-cuda:latest
+    # Устройство не передаём аргументом — берётся из DEVICE (env ниже):
+    # auto → cuda на GPU-машине, cpu без неё
+    command: python -m app.streaming.yolo_consumer yolov8n.pt
     environment:
-      DATABASE_URL: postgresql://user:pass@db:5432/vision
-      DEVICE: "0"
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin123
-      S3_BUCKET: vision
+      DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
+      DEVICE: ${DEVICE:-auto}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin123}
+      S3_BUCKET: ${S3_BUCKET:-vision}
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
       minio:
         condition: service_healthy
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   # ============================================================
   # Detection Consumer — сохранение детекций в БД
@@ -195,17 +245,20 @@ services:
   detection-consumer:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.cpu
+    image: vap-cpu:latest
     command: python -m app.streaming.consumer
     environment:
-      DATABASE_URL: postgresql://user:pass@db:5432/vision
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092 
+      DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
-        
+
   # ============================================================
   # MediaMTX — RTSP сервер для симуляции камеры
   # ============================================================
@@ -216,7 +269,7 @@ services:
       - "8889:8889"   # WebRTC (опционально)
     environment:
       MTX_RTSP_TRANSPORTS: tcp
-  
+
   # ============================================================
   # MinIO — S3-совместимое хранилище файлов
   # ============================================================
@@ -226,8 +279,8 @@ services:
       - "9000:9000"     # S3 API
       - "9001:9001"     # Web Console
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin123
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin123}
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data

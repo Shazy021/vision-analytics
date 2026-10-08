@@ -1,0 +1,32 @@
+# ============================================================
+# GPU override — подключается ПОВЕРХ docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Или просто: make up — Makefile сам проверит nvidia-smi и подключит
+# этот файл только на машинах с NVIDIA.
+#
+# Само устройство инференса берётся из DEVICE (см. .env):
+# DEVICE=auto → torch.cuda.is_available() → cuda, иначе cpu.
+# Этот файл добавляет только РЕЗЕРВИРОВАНИЕ GPU на уровне Docker:
+# контейнеры получают гарантированный доступ к видеокартам.
+# ============================================================
+
+services:
+  worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  yolo-consumer:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
