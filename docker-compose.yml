@@ -139,7 +139,7 @@ services:
   dashboard:
     build:
       context: .
-      dockerfile: dashboard/Dockerfile
+      dockerfile: Dockerfile.cpu
     image: vap-cpu:latest
     command: streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
     ports:

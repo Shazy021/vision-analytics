@@ -2,7 +2,8 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
+RUN pip install --no-cache-dir torch torchvision \
+    --index-url https://download.pytorch.org/whl/cu132
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt && \
