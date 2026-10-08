@@ -1,5 +1,7 @@
 # Vision Analytics Platform
 
+![CI](https://github.com/Shazy021/vision-analytics/actions/workflows/ci.yml/badge.svg)
+
 Платформа видеоаналитики: загрузка видео / RTSP-стрим → YOLO-детекция → Kafka → PostgreSQL → REST API → Streamlit-дашборд.
 
 ## Стек
@@ -18,10 +20,46 @@
 ### Docker
 
 ```bash
+# 1. Создай .env из шаблона (секреты и хосты сервисов)
+cp .env.example .env
+
+# 2. Подними все сервисы
 docker-compose up -d
 ```
 
-Поднимутся 11 сервисов: db, redis, kafka, api, worker (x2), flower, dashboard, yolo-consumer, detection-consumer, mediamtx.
+Поднимутся 12 сервисов: db, redis, kafka, kafka-init (разовый — создаёт топики), api, worker (x2), flower, dashboard, yolo-consumer, detection-consumer, mediamtx.
+
+> 🔐 Пароли/ключи задаются переменными в `.env` (${VAR:-default} в compose).
+> В репозитории только безопасные дев-дефолты — для прода переопредели их в `.env`.
+
+> 💻 **GPU определяется автоматически.** Скрипты старта проверяют наличие NVIDIA
+> (nvidia-smi) и подключают GPU-резервы из `docker-compose.gpu.yml` только на
+> GPU-машинах. Без NVIDIA тот же стек поднимется на CPU — без правок файлов.
+>
+> **Почему образ с CUDA, а GPU — через override?** Образ собирается с CUDA-сборкой
+> torch, но это только ядра: чтобы контейнер реально увидел карту, Docker должен
+> выдать ему устройство через `deploy.resources.reservations.devices` (nvidia).
+> Вшивать резервы в базовый compose нельзя — тогда `docker compose up` падает
+> с ошибкой "could not select device driver nvidia" на любой машине без GPU.
+> Поэтому: базовый файл CPU-safe, а карта выдаётся только там, где она есть.
+>
+> | Окружение | Команда |
+> |----------------------|---------------------------------------------|
+> | Linux / macOS / WSL2 | `make up` |
+> | Windows | `.\scripts\up.cmd` |
+> | Вручную (CPU) | `docker compose up -d` |
+> | Вручную (GPU) | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` |
+>
+> **Важно про ручной GPU-запуск:** override подключается ВМЕСТЕ с базовым
+> файлом — сначала `docker-compose.yml`, потом `docker-compose.gpu.yml`.
+> Если передать только override, проект невалиден (сервисы описаны в базовом).
+> Флаги `-f` ставятся ДО слова `up`.
+>
+> **Почему `.cmd`, а не `.ps1`:** PowerShell по умолчанию блокирует
+> неподписанные скрипты (ошибка «не имеет цифровой подписи»). `up.cmd`
+> обходит это сам. Если хочешь запускать `up.ps1` напрямую — разреши
+> локальные скрипты один раз:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 
 ### Доступ
 
@@ -67,6 +105,36 @@ ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transp
 
 Пайплайн: Producer → Kafka (`raw_frames`) → YOLO Consumer → Kafka (`detections`) → Detection Consumer → PostgreSQL.
 
+### Стримы не работают — чек-лист
+
+Механика: кнопка ▶️ Запустить стартует producer как **subprocess внутри контейнера api**.
+Если источник не открылся — процесс умирает, а статус через пару секунд снова станет `inactive`
+(повторный «Запустить» вернёт 200, а не «already running» — так легко отследить мёртвый producer).
+
+**1. Смотри логи producer'а** — он пишет прямо в лог api-контейнера:
+
+```bash
+docker compose logs api --tail 50
+```
+
+Там будет либо причина падения с трейсбеком, либо прогресс «Отправлено кадров: N».
+
+**2. Типовая причина №1 — адрес источника не виден из контейнера.**
+Producer работает внутри api, и `localhost` внутри контейнера — это сам контейнер, а не твоя машина:
+
+| Откуда источник | URL для стрима |
+|---|---|
+| Встроенный MediaMTX | `rtsp://mediamtx:8554/mystream` |
+| Программа на Windows-хосте (FFmpeg/OBS/Larix) | `rtsp://host.docker.internal:8554/mystream` |
+| IP-камера в LAN | `rtsp://admin:pass@192.168.1.100:554/stream` |
+
+**3. Типовая причина №2 — в источник никто не публикует поток.**
+MediaMTX — приёмник, он сам видео не генерирует. Проверка с хоста (нужен ffmpeg):
+
+```bash
+ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
+```
+
 ### Локально (без Docker)
 
 ```bash
@@ -86,21 +154,45 @@ uvicorn app.main:app --reload
 streamlit run dashboard/app.py
 
 # Celery Worker
-celery -A app.core.celery_app worker --loglevel=info --concurrency=2 -Q processing
+# --pool=solo: CUDA-контекст не переживает fork(), а prefork-пул Celery
+# форкает процессы (RuntimeError "Cannot re-initialize CUDA in forked
+# subprocess"). solo выполняет задачи в главном процессе — для GPU это
+# правильный дефолт.
+celery -A app.core.celery_app worker --loglevel=info --pool=solo -Q processing
 
 # Kafka Consumers
-python -m app.streaming.yolo_consumer yolov8n.pt 0
+python -m app.streaming.yolo_consumer yolov8n.pt   # устройство — из DEVICE (auto → cpu без GPU)
 python -m app.streaming.consumer
 ```
 
-### Тесты
+### Тесты и линтер
 
 ```bash
+# Тесты — полностью герметичны и не требуют Docker: sqlite in-memory,
+# сеть не трогается (MinIO/Kafka замоканы в conftest), eager-Celery,
+# тестовое видео генерируется на месте. Весь сьют — несколько секунд.
 pytest tests/ -v
 
 # Только стриминг-тесты
 pytest tests/test_streaming.py -v
+
+# Линтер (тот же, что в CI)
+ruff check app dashboard tests
 ```
+
+### Pre-commit — автопроверки перед коммитом
+
+Хуки запускают ruff и гигиену файлов (пробелы, конец файла, валидность YAML/TOML,
+защита от крупных файлов и приватных ключей) на каждый `git commit`. Установка — один раз:
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+- Первый прогон по всему репозиторию: `pre-commit run --all-files`
+- Если хук автоисправил файлы — просто `git add -u` и коммить снова
+- Хуки живут в `.pre-commit-config.yaml`; версии синхронизированы с CI
 
 ## API Endpoints
 
@@ -168,13 +260,14 @@ Kafka — транспорт, не хранилище. Все детекции �
 │   │   └── consumer.py      # Kafka → PostgreSQL
 │   └── main.py              # FastAPI entry point
 ├── dashboard/
-│   ├── app.py               # Streamlit dashboard
-│   └── Dockerfile           # Dashboard container
+│   └── app.py               # Streamlit dashboard
 ├── alembic/                 # Database migrations
 ├── tests/                   # Test suite
-├── docker-compose.yml       # 11 services
-├── Dockerfile               # API + workers
-└── requirements.txt
+├── docker-compose.yml       # 12 services (kafka-init — разовый)
+├── Dockerfile               # CUDA-образ: worker, yolo-consumer (инференс)
+├── Dockerfile.cpu           # CPU-образ: api, flower, detection-consumer, dashboard
+├── requirements.txt         # зависимости CUDA-образа (torch/ultralytics)
+└── requirements.cpu.txt     # зависимости CPU-образа (без torch)
 ```
 
 ## Требования
@@ -182,3 +275,7 @@ Kafka — транспорт, не хранилище. Все детекции �
 - Docker + Docker Compose
 - NVIDIA GPU + Docker GPU support (для YOLO-инференса)
 - FFmpeg (для симуляции RTSP с видео-файла)
+
+> Без NVIDIA тоже запустится: `DEVICE=auto` в конфиге выбирает CPU автоматически
+> (см. `app/core/config.py::_detect_device`). GPU-резервы Docker подключает
+> только на NVIDIA-машинах — через `make up` или override-файл (см. выше).
