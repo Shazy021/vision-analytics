@@ -1,11 +1,12 @@
 """API endpoints для управления RTSP стримами"""
 import subprocess
-import threading
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.core.database import SessionLocal
+
 from app.core import storage
-from app.db.models import Stream, Detection
+from app.core.database import SessionLocal
+from app.db.models import Detection, Stream
 
 router = APIRouter(prefix="/api/streams", tags=["streams"])
 
@@ -114,7 +115,11 @@ def start_stream(stream_id: int):
         if stream_id in _running_processes and _running_processes[stream_id].poll() is None:
             raise HTTPException(status_code=400, detail="Stream already running")
 
-        # Запускаем producer как subprocess
+        # Запускаем producer как subprocess.
+        # stdout/stderr НЕ глотаем (никаких DEVNULL): producer пишет диагностику
+        # (ретраи открытия RTSP, прогресс, трейсбеки) прямо в лог api-контейнера.
+        # Раньше DEVNULL превращал любое падение producer'а в «тихую смерть»
+        # при 200 OK — и стримы не работали без единой подсказки в логах.
         process = subprocess.Popen(
             [
                 "python", "-m", "app.streaming.producer",
@@ -122,8 +127,6 @@ def start_stream(stream_id: int):
                 str(stream.fps),
                 str(stream.id),
             ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
         _running_processes[stream_id] = process
 

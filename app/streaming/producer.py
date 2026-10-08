@@ -1,9 +1,35 @@
-"""Kafka Producer — отправка кадров в топик raw_frames"""
-import cv2
+"""Kafka Producer — читает источник (RTSP / файл) и шлёт кадры в топик raw_frames
+
+Запускается как subprocess ИЗНУТРИ api-контейнера
+(app/api/routes/streams.py → POST /{stream_id}/start), поэтому:
+- логи идут в stdout/stderr процесса api и видны в `docker compose logs api`;
+- адрес источника должен открываться С ТОЧКИ ЗРЕНИЯ КОНТЕЙНЕРА:
+  * встроенный MediaMTX:          rtsp://mediamtx:8554/<path>
+  * источник на хосте (Windows):  rtsp://host.docker.internal:<port>/<path>
+  * localhost изнутри контейнера — это сам контейнер, а НЕ машина хоста.
+"""
 import base64
 import json
+import logging
+import os
+import time
+
+import cv2
 from confluent_kafka import Producer
+
 from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_RAW_FRAMES
+
+logger = logging.getLogger(__name__)
+
+# MediaMTX в docker-compose принимает RTSP только по TCP (MTX_RTSP_TRANSPORTS: tcp),
+# а OpenCV по умолчанию тянет RTSP по UDP — в Docker/WSL2 UDP-пакеты часто
+# теряются, и VideoCapture не открывается вовсе. Форсим TCP для RTSP-захвата.
+# setdefault — чтобы значение можно было переопределить снаружи (compose/.env).
+RTSP_CAPTURE_ENV = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
+RTSP_CAPTURE_OPTS = "rtsp_transport;tcp"
+
+OPEN_ATTEMPTS = 3      # сколько раз пробуем открыть источник
+OPEN_RETRY_DELAY = 3   # пауза между попытками, сек
 
 
 class FrameProducer:
@@ -20,35 +46,104 @@ class FrameProducer:
 
     def _delivery_report(self, err, msg):
         if err:
-            print(f"\nSEND ERROR: {err}")
+            logger.error(f"Delivery error: {err}")
+
+    def _open_capture(self) -> cv2.VideoCapture:
+        """Открыть источник с ретраями и понятной диагностикой.
+
+        Раньше провал открытия ронял процесс молча (stderr глотался роутом),
+        и «стрим не робил» без единой строчки в логах — теперь причина видна
+        в `docker compose logs api`.
+        """
+        os.environ.setdefault(RTSP_CAPTURE_ENV, RTSP_CAPTURE_OPTS)
+        is_rtsp = str(self.source).lower().startswith("rtsp://")
+
+        for attempt in range(1, OPEN_ATTEMPTS + 1):
+            cap = cv2.VideoCapture(self.source)
+            if cap.isOpened():
+                return cap
+            cap.release()
+            logger.warning(
+                "Попытка %d/%d: не удалось открыть источник %r",
+                attempt, OPEN_ATTEMPTS, self.source,
+            )
+            time.sleep(OPEN_RETRY_DELAY)
+
+        if is_rtsp:
+            hint = (
+                "Адрес должен открываться ИЗ api-контейнера: localhost внутри "
+                "контейнера — это сам контейнер. Для встроенного MediaMTX — "
+                "rtsp://mediamtx:8554/<path>, для источника на хосте — "
+                "rtsp://host.docker.internal:<port>/<path>. Убедись, что в источник "
+                "кто-то ПУБЛИКУЕТ поток (MediaMTX сам видео не генерирует)."
+            )
+        else:
+            hint = (
+                "Проверь, что файл существует ВНУТРИ контейнера api "
+                "(./uploads на хосте = /app/uploads в контейнере)."
+            )
+        raise ConnectionError(
+            f"Не удалось открыть источник {self.source!r} за {OPEN_ATTEMPTS} попыток. {hint}"
+        )
 
     def run(self):
-        cap = cv2.VideoCapture(self.source)
-        if not cap.isOpened():
-            raise ConnectionError(f"Cannot open: {self.source}")
+        cap = self._open_capture()
+
+        # Файл в роли «стрима» зацикливаем: стрим бесконечен по определению,
+        # а одиночный проход файла завершает процесс через N секунд
+        # и стрим сам собой «умирает» — сбивает с толку.
+        is_rtsp = str(self.source).lower().startswith("rtsp://")
+        loop_file = not is_rtsp and self.stream_id is not None
 
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
         frame_interval = max(1, int(src_fps / self.fps))
-        frame_count = 0
+        frame_index = 0  # сквозной счётчик прочитанных кадров (ключ кадра в MinIO)
         sent_count = 0
 
-        print(f"Streaming → Kafka '{TOPIC_RAW_FRAMES}' at {self.fps} fps" +
-              (f" (stream_id={self.stream_id})" if self.stream_id else ""))
+        # Для файлов эмулируем реальное время: RTSP и так идёт в реальном темпе
+        # (кадры прибывают с камеры), а файл читается быстрее некуда — без паузы
+        # он завалит Kafka кадрами со скоростью диска вместо заявленных fps.
+        is_file = not is_rtsp
+        frame_period = 1.0 / src_fps
+        next_read = time.monotonic()
+
+        logger.info(
+            "Streaming → Kafka '%s' at %d fps (source=%s, stream_id=%s%s)",
+            TOPIC_RAW_FRAMES, self.fps, self.source, self.stream_id,
+            ", loop" if loop_file else "",
+        )
 
         try:
-            while cap.isOpened():
+            while True:
                 ret, frame = cap.read()
                 if not ret:
-                    print(f"\nEnd of video. Total frames: {frame_count}, sent: {sent_count}")
+                    if loop_file:
+                        cap.release()
+                        cap = cv2.VideoCapture(self.source)
+                        if not cap.isOpened():
+                            logger.error("Файл перестал открываться на новом витке — останавливаюсь")
+                            break
+                        logger.info("Файл закончился — начинаю заново (live-симуляция)")
+                        continue
+                    logger.info(
+                        "Источник закончился. Кадров прочитано: %d, отправлено: %d",
+                        frame_index, sent_count,
+                    )
                     break
 
-                if frame_count % frame_interval == 0:
+                if is_file:
+                    now = time.monotonic()
+                    if next_read > now:
+                        time.sleep(next_read - now)
+                    next_read = time.monotonic() + frame_period
+
+                if frame_index % frame_interval == 0:
                     _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     frame_b64 = base64.b64encode(buffer).decode()
 
                     message = json.dumps({
                         "frame_data": frame_b64,
-                        "frame_index": frame_count,
+                        "frame_index": frame_index,
                         "source": self.source,
                         "stream_id": self.stream_id,
                     }).encode()
@@ -61,12 +156,17 @@ class FrameProducer:
                     self.producer.poll(0)
 
                     sent_count += 1
-                    print(f"Sent frame #{frame_count} ({sent_count} total)")
+                    # Не спамим в общий лог api: каждый кадр — DEBUG,
+                    # прогресс раз в 25 кадров (и первый) — INFO
+                    if sent_count == 1 or sent_count % 25 == 0:
+                        logger.info("Отправлено кадров: %d (frame_index=%d)", sent_count, frame_index)
+                    else:
+                        logger.debug("Отправлен кадр #%d", frame_index)
 
-                frame_count += 1
+                frame_index += 1
 
         except KeyboardInterrupt:
-            print(f"\nStopped. Sent {sent_count} frames")
+            logger.info("Остановлено вручную. Отправлено кадров: %d", sent_count)
         finally:
             cap.release()
             self.producer.flush()
@@ -74,8 +174,23 @@ class FrameProducer:
 
 if __name__ == "__main__":
     import sys
+
+    # basicConfig нужен: это отдельный процесс, без него logging по умолчанию
+    # печатает только WARNING+. Логи видны через `docker compose logs api` —
+    # сюда же попадают падения producer'а (раньше они глотались DEVNULL).
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     source = sys.argv[1] if len(sys.argv) > 1 else "test_video.mp4"
     fps = int(sys.argv[2]) if len(sys.argv) > 2 else 2
     stream_id = int(sys.argv[3]) if len(sys.argv) > 3 else None
+
     producer = FrameProducer(source, fps=fps, stream_id=stream_id)
-    producer.run()
+    try:
+        producer.run()
+    except Exception:
+        logger.exception("Producer упал (source=%r, stream_id=%s)", source, stream_id)
+        raise SystemExit(1)

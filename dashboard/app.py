@@ -1,11 +1,12 @@
 """
 Streamlit-дашборд для Vision Analytics Platform.
 """
-import streamlit as st
+import os
+import time
+
 import plotly.express as px
 import requests
-import time
-import os
+import streamlit as st
 
 # ============================================================
 # НАСТРОЙКА СТРАНИЦЫ
@@ -30,7 +31,7 @@ def get_stats(source=None):
             params["source"] = source
         r = requests.get(f"{API_URL}/api/analytics/stats", params=params, timeout=5)
         return r.json() if r.status_code == 200 else None
-    except:
+    except Exception:
         return None
 
 
@@ -46,7 +47,7 @@ def get_class_distribution(video_id=None, stream_id=None, source=None):
             params["source"] = source
         r = requests.get(f"{API_URL}/api/analytics/class-distribution", params=params, timeout=5)
         return r.json() if r.status_code == 200 else []
-    except:
+    except Exception:
         return []
 
 
@@ -60,7 +61,7 @@ def get_timeline(video_id=None, source=None, bucket=5.0):
             params["source"] = source
         r = requests.get(f"{API_URL}/api/analytics/timeline", params=params, timeout=5)
         return r.json() if r.status_code == 200 else []
-    except:
+    except Exception:
         return []
 
 
@@ -72,7 +73,7 @@ def get_stream_activity(stream_id=None, minutes=10):
             params["stream_id"] = stream_id
         r = requests.get(f"{API_URL}/api/analytics/stream-activity", params=params, timeout=5)
         return r.json() if r.status_code == 200 else []
-    except:
+    except Exception:
         return []
 
 
@@ -81,7 +82,7 @@ def get_videos():
     try:
         r = requests.get(f"{API_URL}/api/videos", timeout=5)
         return r.json() if r.status_code == 200 else []
-    except:
+    except Exception:
         return []
 
 
@@ -90,7 +91,7 @@ def get_streams():
     try:
         r = requests.get(f"{API_URL}/api/streams", timeout=5)
         return r.json() if r.status_code == 200 else []
-    except:
+    except Exception:
         return []
 
 
@@ -99,7 +100,7 @@ def get_stream_detections(stream_id, limit=100):
     try:
         r = requests.get(f"{API_URL}/api/streams/{stream_id}/detections", params={"limit": limit}, timeout=5)
         return r.json() if r.status_code == 200 else []
-    except:
+    except Exception:
         return []
 
 
@@ -249,7 +250,7 @@ elif page == "📡 Стримы":
             st.metric("🎯 Детекций со стримов", stream_stats["total_detections"])
         with col3:
             st.metric("📊 Средняя уверенность", f"{stream_stats['avg_confidence']:.1%}")
-        
+
     st.markdown("---")
 
     # Автообновление каждые 5 сек
@@ -285,6 +286,13 @@ elif page == "📡 Стримы":
                     st.error(f"❌ Ошибка: {r.text}")
             except Exception as e:
                 st.error(f"❌ {e}")
+
+    st.caption(
+        "⚠️ Адрес источника должен открываться **изнутри контейнера api**: для встроенного "
+        "MediaMTX — `rtsp://mediamtx:8554/<path>`; для источника на Windows-хосте — "
+        "`rtsp://host.docker.internal:<port>/<path>`. `localhost` внутри контейнера — это сам контейнер. "
+        "Если стрим не стартует — смотри `docker compose logs api --tail 50`: producer пишет туда причину."
+    )
 
     st.markdown("---")
 
@@ -410,15 +418,19 @@ elif page == "📡 Стримы":
 
     st.markdown("---")
 
-    with st.expander("ℹ️ Как запустить обработку стрима вручную"):
+    with st.expander("ℹ️ Стрим не работает — где смотреть причину"):
         st.code(
-            "# 1. Запусти YOLO consumer\n"
-            "python -m app.streaming.yolo_consumer yolov8n.pt 0\n\n"
-            "# 2. Запусти DB consumer\n"
-            "python -m app.streaming.consumer\n\n"
-            "# 3. Запусти producer с RTSP URL\n"
-            'python -m app.streaming.producer "rtsp://..." 5\n\n'
-            "# Или с видео-файлом для теста\n"
-            'python -m app.streaming.producer data/output.mp4 2 --loop',
+            "# Producer стрима — это subprocess внутри контейнера api,\n"
+            "# его логи (и падения) прилетают сюда:\n"
+            "docker compose logs api --tail 50\n\n"
+            "# Инференс (YOLO) и запись в БД:\n"
+            "docker compose logs yolo-consumer --tail 30\n"
+            "docker compose logs detection-consumer --tail 30\n\n"
+            "# Топики Kafka (создаются сервисом kafka-init):\n"
+            "docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list\n\n"
+            "# Ручной запуск producer (адрес — с точки зрения КОНТЕЙНЕРА!):\n"
+            "docker compose exec api python -m app.streaming.producer rtsp://mediamtx:8554/mystream 5 1\n\n"
+            "# Тест без камеры: положи .mp4 в ./uploads — в контейнере это /app/uploads/…\n"
+            "docker compose exec api python -m app.streaming.producer /app/uploads/demo.mp4 5 1",
             language="bash",
         )
