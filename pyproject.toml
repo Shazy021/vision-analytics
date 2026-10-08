@@ -16,3 +16,18 @@ script_location = "%(here)s/alembic"
 # Добавить текущую директорию в sys.path
 # Чтобы env.py мог сделать "from app.core.config import settings"
 prepend_sys_path = ["."]
+
+[tool.ruff]
+# Длина строки 100 — стандарт для большинства команд, мягче чем 88
+line-length = 100
+target-version = "py312"
+extend-exclude = ["models_cache", "uploads", "data", "alembic/versions"]
+
+[tool.ruff.lint]
+# E4/E7/E9 — ошибки стиля и синтаксиса, F — ошибки уровня "забыл импорт",
+# I — сортировка импортов. Консервативный набор: не душит легаси-код.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.format]
+# Совместим с black-стилем
+quote-style = "double"

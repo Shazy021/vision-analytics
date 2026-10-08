@@ -1,0 +1,42 @@
+# ============================================================
+# Pre-commit — автопроверки перед каждым git commit.
+#
+# Установка (один раз после клонирования репозитория):
+#   pip install -r requirements-dev.txt
+#   pre-commit install
+#
+# Разовый прогон по всем файлам:
+#   pre-commit run --all-files
+#
+# Как это работает: хук нашёл проблему → коммит отменён.
+# Если хук автоисправил файлы (ruff --fix, пробелы, EOF) —
+# просто добавь их снова: git add -u && git commit ...
+# ============================================================
+repos:
+  # --- Стандартная гигиена файлов -------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace       # хвостовые пробелы
+        exclude: ^alembic/versions/   # автогенерируемые миграции не трогаем
+      - id: end-of-file-fixer         # файл заканчивается ровно одним \n
+        exclude: ^alembic/versions/
+      - id: check-yaml                # валидность YAML (compose, workflows)
+      - id: check-toml                # валидность TOML (pyproject)
+      - id: check-merge-conflict      # незачищенные conflict-маркеры
+      - id: detect-private-key        # приватные ключи не пройдут в git
+      - id: check-added-large-files   # защита от случайных .pt / .mp4 в коммите
+
+  # --- Ruff: тот же линтер и та же версия, что в CI --------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  # --- Форматирование (включи позже, когда будешь готов к единому стилю).
+  # Первый прогон даёт большой diff по всему коду:
+  # - repo: https://github.com/astral-sh/ruff-pre-commit
+  #   rev: v0.16.10
+  #   hooks:
+  #     - id: ruff-format
