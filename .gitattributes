@@ -1,0 +1,18 @@
+# Единые окончания строк для всех текстовых файлов (git сам нормализует)
+* text=auto eol=lf
+
+# Windows-специфичные
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Бинарники — не трогать
+*.pt binary
+*.pth binary
+*.onnx binary
+*.mp4 binary
+*.avi binary
+*.mov binary
+*.mkv binary
+*.png binary
+*.jpg binary
+*.jpeg binary
