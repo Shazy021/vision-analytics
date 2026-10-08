@@ -2,9 +2,15 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 uploads/
+data/
+models_cache/
 *.mp4
 *.avi
 *.mov
 .git/
+.github/
 .env
+.pre-commit-config.yaml
+docs/

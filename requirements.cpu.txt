@@ -1,0 +1,41 @@
+# CPU-образ (Dockerfile.cpu): api, flower, detection-consumer, dashboard.
+#
+# Отличие от requirements.txt: БЕЗ torch/ultralytics — GPU-инференс нужен
+# только worker и yolo-consumer, они собираются из Dockerfile (CUDA).
+# opencv оставлен: producer (RTSP → Kafka) запускается как subprocess
+# внутри api-контейнера и читает кадры через cv2.
+
+# --- API ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+pydantic==2.9.0
+pydantic-settings==2.5.0
+python-multipart==0.0.9
+
+# --- База данных ---
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+alembic==1.13.2
+
+# --- Кадры/стримы (producer как subprocess в api) ---
+# История версий (обе ошибки вылезли только в пересобранном образе, не в тестах):
+#   4.10.0.82 — колёса под ABI NumPy 1.x → ImportError на numpy 2.x
+#               ("numpy.core.multiarray failed to import")
+#   4.13.0.90 — переход на FFmpeg 62 + libavdevice тянет СИСТЕМНЫЙ libxcb.so.1,
+#               которого нет в python:3.12-slim → ImportError на import cv2
+#   4.12.0.88 — самодостаточна, но numpy<2.3 — конфликт с плавающим numpy
+#   4.13.0.92 — выбранная: xcb-регрессия починена, numpy>=2 без верхней границы,
+#               системные зависимости только glibc/libstdc++/libgcc/libz (есть в slim)
+opencv-python-headless==4.13.0.92
+
+# --- Дашборд ---
+streamlit==1.38.0
+plotly==5.24.0
+requests==2.32.3
+
+# --- Celery / Kafka / S3 ---
+celery==5.4.0
+redis==5.2.0
+flower==2.0.1
+confluent-kafka==2.4.0
+minio==7.2.15

@@ -1,0 +1,29 @@
+# ============================================================
+# CPU-образ: api, flower, detection-consumer, dashboard.
+#
+# Отличие от Dockerfile: без torch/ultralytics — инференс нужен
+# только worker и yolo-consumer, они собираются из Dockerfile (CUDA).
+# Так 4 из 6 сервисов занимают ~2 GB вместо 10.6 GB каждый,
+# а их пересборка занимает минуты, а не час.
+# ============================================================
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+COPY requirements.cpu.txt .
+RUN pip install --no-cache-dir -r requirements.cpu.txt
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+COPY . .
+
+RUN mkdir -p uploads
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

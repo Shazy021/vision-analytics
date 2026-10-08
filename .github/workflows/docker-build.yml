@@ -1,0 +1,83 @@
+# ============================================================
+# Сборка Docker-образов (запускается вручную: Actions → Docker build → Run)
+#
+# Отдельно от ci.yml: ci (push) проверяет код (ruff + pytest) БЕЗ Docker,
+# поэтому каждый пуш — минуты, а не часы. Здесь — только проверка сборки:
+#   - vap-cpu  (~2 GB, минуты) — api / flower / detection-consumer / dashboard
+#   - vap-cuda (~10-11 GB, дольше) — worker / yolo-consumer, кэш gha ускоряет
+# Пуш в registry не делаем — только проверяем, что Dockerfile-ы собираются.
+# Для деплоя добавь registry credentials и push: true.
+#
+# После сборки — smoke прямо внутри образа (docker run): import cv2/numpy/
+# ultralytics. Это ловит класс ошибок, невидимый для ci.yml (он гоняет тесты
+# в окружении разработчика, а не в slim-образе):
+#   - ABI-конфликт «старое колесо × новый numpy» (opencv 4.10 + numpy 2.5)
+#   - отсутствие системных библиотек в slim (opencv 4.13.0.90 → libxcb.so.1)
+# Обе ошибки уже вылезали: тесты зелёные, а producer в контейнере падал
+# на import cv2. Smoke в образе закрывает эту дыру.
+# ============================================================
+name: Docker build
+
+on:
+  workflow_dispatch:
+
+# Два ручных запуска параллельно не нужны — только жгут минуты раннера
+concurrency:
+  group: docker-build
+  cancel-in-progress: false
+
+jobs:
+  build-cpu:
+    name: Build CPU image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build CPU image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cpu
+          push: false
+          tags: vap-cpu:ci
+          cache-from: type=gha,scope=cpu
+          cache-to: type=gha,mode=max,scope=cpu
+
+      # Smoke ВНУТРИ собранного образа: verify-окружение = runtime-окружение.
+      # Упавший шаг краснит джобу до того, как образ уедет к пользователю.
+      - name: Smoke — import cv2/numpy/app.main inside image
+        run: |
+          docker run --rm --entrypoint python vap-cpu:ci \
+            -c "import cv2, numpy; from app.main import app; print('cpu smoke OK: cv2', cv2.__version__, '| numpy', numpy.__version__)"
+
+  build-cuda:
+    name: Build CUDA image
+    runs-on: ubuntu-latest
+    # Явный предохранитель: билд с CUDA-torch долгий, но не бесконечный.
+    # Без строки подействует дефолт GitHub (360 мин) — зависший билд
+    # сжёг бы часы quota-минут раньше, чем кто-то заметит
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build CUDA image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: vap-cuda:ci
+          cache-from: type=gha,scope=cuda
+          cache-to: type=gha,mode=max,scope=cuda
+
+      # CUDA-образ = тот же cv2 + ultralytics: проверяем импорт ML-стека
+      # (без GPU-инференса — на раннере нет карты, DEVICE здесь не трогаем)
+      - name: Smoke — import cv2/numpy/ultralytics inside image
+        run: |
+          docker run --rm --entrypoint python vap-cuda:ci \
+            -c "import cv2, numpy, ultralytics; print('cuda smoke OK: cv2', cv2.__version__, '| numpy', numpy.__version__)"
