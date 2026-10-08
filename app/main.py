@@ -2,10 +2,12 @@
 Главный файл FastAPI-приложения.
 """
 import logging
-from fastapi import FastAPI
-from app.api.routes import videos, analytics, streams
-from app.core.database import init_db
 from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from app.api.routes import analytics, streams, videos
+from app.core.database import init_db
 
 # Настройка логгера для этого модуля
 logging.basicConfig(
@@ -22,7 +24,12 @@ async def lifespan(app):
     try:
         init_db()
     except Exception:
-        pass
+        # БД может быть ещё не готова (например, старт до миграций).
+        # Не валим приложение, но громко логируем: таблицы могло не создать.
+        logger.exception(
+            "[Startup] init_db failed — таблицы не созданы. "
+            "Проверь DATABASE_URL и выполни 'alembic upgrade head'."
+        )
 
     # Создаём бакет в MinIO, если его ещё нет
     # + устанавливаем TTL для кадров стримов (автоудаление через N дней)

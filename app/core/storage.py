@@ -1,31 +1,53 @@
 """
 S3-совместимое хранилище файлов (MinIO).
+
+Все параметры берутся из единого конфига (app.core.config.settings):
+S3_ENDPOINT, S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET.
 """
-import os
 import io
+import logging
 from urllib.parse import urlparse
 
+import urllib3
 from minio import Minio
 from minio.error import S3Error
 
-# Настройки из окружения
-ENDPOINT = os.environ.get("S3_ENDPOINT", "localhost:9000")
-ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "minioadmin")
-SECRET_KEY = os.environ.get("S3_SECRET_KEY", "minioadmin123")
-BUCKET = os.environ.get("S3_BUCKET", "vision")
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+BUCKET = settings.s3_bucket
 
 # Убираем http:// из endpoint для Minio client
-_endpoint_url = urlparse(f"http://{ENDPOINT}" if not ENDPOINT.startswith("http") else ENDPOINT)
+_endpoint_url = urlparse(
+    settings.s3_endpoint
+    if settings.s3_endpoint.startswith("http")
+    else f"http://{settings.s3_endpoint}"
+)
 _endpoint_host = _endpoint_url.hostname
 _endpoint_port = _endpoint_url.port or 9000
 
-print(f"[Storage] S3_ENDPOINT={ENDPOINT} → connecting to {_endpoint_host}:{_endpoint_port}")
+logger.info(f"[Storage] S3: {_endpoint_host}:{_endpoint_port}, bucket={BUCKET}")
+
+# Явные таймауты и лимит ретраев: с http_client по умолчанию minio-py
+# выжидает полный urllib3-бэкофф (~6+ сек на вызов), и старт приложения
+# без MinIO подвисает на десятки секунд. 2 сек на подключение + 2 попытки
+# — MinIO недоступен становится понятно сразу, lifespan это переживает.
+_HTTP_CLIENT = urllib3.PoolManager(
+    timeout=urllib3.Timeout(connect=2.0, read=30.0),
+    retries=urllib3.Retry(
+        total=2,
+        backoff_factor=0.2,
+        status_forcelist=[500, 502, 503, 504],
+    ),
+)
 
 client = Minio(
     f"{_endpoint_host}:{_endpoint_port}",
-    access_key=ACCESS_KEY,
-    secret_key=SECRET_KEY,
+    access_key=settings.s3_access_key,
+    secret_key=settings.s3_secret_key,
     secure=False,
+    http_client=_HTTP_CLIENT,
 )
 
 def ensure_bucket():
@@ -106,8 +128,8 @@ def set_stream_frames_ttl(days: int = 7):
     пользователем файлы, их нельзя удалять автоматически. А кадры стримов
     — это расходный материал, они теряют актуальность через несколько дней.
     """
-    from minio.lifecycleconfig import LifecycleConfig, Rule, Expiration
     from minio.commonconfig import Filter
+    from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
 
     config = LifecycleConfig([
         Rule(
@@ -118,4 +140,4 @@ def set_stream_frames_ttl(days: int = 7):
         ),
     ])
     client.set_bucket_lifecycle(BUCKET, config)
-    print(f"[Storage] TTL set: stream frames auto-delete after {days} days")
+    logger.info(f"[Storage] TTL set: stream frames auto-delete after {days} days")

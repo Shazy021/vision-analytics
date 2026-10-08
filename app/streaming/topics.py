@@ -1,7 +1,8 @@
 """Kafka топики и конфигурация"""
-import os
+from app.core.config import settings
 
-KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+# Единый конфиг: переопределяется через KAFKA_BOOTSTRAP_SERVERS (.env / compose)
+KAFKA_BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers
 
 TOPIC_RAW_FRAMES = "raw_frames"
 TOPIC_DETECTIONS = "detections"

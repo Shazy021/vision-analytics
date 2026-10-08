@@ -6,17 +6,19 @@ Phase 4: Сохраняем ЧИСТЫЕ кадры со стримов в MinIO
 Кадры сохраняются ТОЛЬКО если на них есть детекции —
 нет смысла хранить пустые кадры.
 """
-import json
 import base64
-import numpy as np
+import json
 import logging
+
 import cv2
+import numpy as np
 from confluent_kafka import Consumer, Producer
+
 from app.core.config import settings
 from app.streaming.topics import (
     KAFKA_BOOTSTRAP_SERVERS,
-    TOPIC_RAW_FRAMES,
     TOPIC_DETECTIONS,
+    TOPIC_RAW_FRAMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +66,7 @@ class YOLOConsumer:
             frame_key = f"streams/{stream_id}/{frame_index}.jpg"
             storage.upload_bytes(frame_key, frame_data, content_type="image/jpeg")
             return True
-        except Exception as e:
+        except Exception:
             # Логируем но не падаем — кадры не критичны
             logger.exception("[YOLO Consumer] Failed to save frame to MinIO")
             # MinIO мог отвалиться — пробуем реконнект при следующем кадре
@@ -161,6 +163,8 @@ class YOLOConsumer:
 if __name__ == "__main__":
     import sys
     model = sys.argv[1] if len(sys.argv) > 1 else "yolov8n.pt"
-    device = sys.argv[2] if len(sys.argv) > 2 else "0"
+    # Без явного аргумента устройство берётся из настроек:
+    # DEVICE=auto → cuda при наличии GPU, иначе cpu (проект не падает без NVIDIA)
+    device = sys.argv[2] if len(sys.argv) > 2 else None
     consumer = YOLOConsumer(model_path=model, device=device)
     consumer.run()
