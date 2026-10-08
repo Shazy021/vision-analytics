@@ -2,16 +2,19 @@ import os
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import func
+from sqlalchemy.orm import Session
 
-from app.core.config import settings
+from app.core import storage  # ← MinIO клиент (модуль, не класс)
 from app.core.database import get_db
-from app.core import storage                       # ← MinIO клиент (модуль, не класс)
-from app.db.models import Video, Detection
+from app.db.models import Detection, Video
 from app.schemas.video import VideoCreate, VideoRead
-from app.tasks.processing import process_video_task
+
+# ВАЖНО: app.tasks.processing НЕ импортируется на уровне модуля —
+# он тянет за собой processor → ultralytics → torch, а api живёт в лёгком
+# CPU-образе без torch (см. Dockerfile.cpu). Импортируем задачу лениво,
+# внутри функций, которые реально ею пользуются.
 
 router = APIRouter(prefix="/api/videos", tags=["Videos"])
 
@@ -79,7 +82,9 @@ def upload_video(
     video.object_key = object_key
     db.commit()
 
-    # Отправляем задачу Celery
+    # Отправляем задачу Celery (ленивый импорт — см. комментарий в шапке модуля)
+    from app.tasks.processing import process_video_task
+
     task = process_video_task.delay(video.id)
     video.task_id = task.id
     db.commit()
@@ -144,6 +149,8 @@ def get_video_status(video_id: int, db: Session = Depends(get_db)):
     result = {"video_id": video_id, "status": video.status}
 
     if video.task_id:
+        from app.tasks.processing import process_video_task
+
         task = process_video_task.AsyncResult(video.task_id)
         result["task_status"] = task.status
         if task.failed():

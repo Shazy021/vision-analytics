@@ -5,9 +5,12 @@
 Решение: CELERY_TASK_ALWAYS_EAGER = True — задачи выполняются
 синхронно, в том же процессе, без брокера.
 """
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from app.tasks.processing import process_video_task
+
 
 @pytest.fixture(autouse=True)
 def celery_eager():
@@ -27,7 +30,7 @@ def celery_eager():
     )
 
 
-@patch("app.tasks.processing.process_video")
+@patch("app.pipeline.processor.process_video")
 @patch("app.tasks.processing.SessionLocal")
 def test_process_video_task_success(mock_session_local, mock_process_video):
     """Задача успешно обрабатывает видео"""
@@ -42,7 +45,7 @@ def test_process_video_task_success(mock_session_local, mock_process_video):
     mock_db.close.assert_called_once()
 
 
-@patch("app.tasks.processing.process_video")
+@patch("app.pipeline.processor.process_video")
 @patch("app.tasks.processing.SessionLocal")
 def test_process_video_task_failure(mock_session_local, mock_process_video):
     """Задача помечает результат как failed при ошибке"""

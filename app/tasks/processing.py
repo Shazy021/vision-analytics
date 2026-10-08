@@ -3,11 +3,16 @@ Celery-задача для обработки видео.
 
 Вместо BackgroundTasks (блокирует event loop FastAPI)
 используем Celery — отдельный воркер в отдельном процессе.
+
+ВАЖНО: этот модуль загружается при старте ЛЮБОГО celery-процесса —
+включая flower (celery -A app.core.celery_app flower импортирует
+include-модули). Поэтому processor импортируется лениво, внутри задачи:
+он тянет ultralytics → torch, а flower живёт в CPU-образе без torch.
 """
 import logging
+
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
-from app.pipeline.processor import process_video
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +20,14 @@ logger = logging.getLogger(__name__)
 def process_video_task(self, video_id: int) -> dict:
     """
     Задача: обработать видео через YOLO.
-    
+
     bind=True — даёт доступ к self (объект задачи),
     можно обновлять статус: self.update_state()
     """
+    # Ленивый импорт — см. докстринг модуля. Тяжёлый стек грузится только
+    # в worker'е, в момент реального выполнения задачи.
+    from app.pipeline.processor import process_video
+
     db = SessionLocal()
     try:
         process_video(video_id, db)
