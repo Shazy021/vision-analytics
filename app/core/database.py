@@ -1,6 +1,15 @@
+import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.core.config import settings
+
+# Настройка логгера
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 # create_engine — "движок" подключения
 # echo=False — не показывать SQL в консоли (поставь True для дебага)
@@ -42,4 +51,4 @@ def init_db():
 if __name__ == "__main__":
     with engine.connect() as conn:
         result = conn.execute(text("SELECT 1"))
-        print("DB connected:", result.scalar())
+        logger.info(f"DB connected: {result.scalar()}")

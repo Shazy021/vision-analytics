@@ -24,7 +24,7 @@ def process_video_task(self, video_id: int) -> dict:
         process_video(video_id, db)
         return {"status": "completed", "video_id": video_id}
     except Exception:
-        logger.exception("process_video_task video_id=%s failed", video_id)
+        logger.exception(f"process_video_task video_id=P{video_id} failed")
         raise
     finally:
         db.close()

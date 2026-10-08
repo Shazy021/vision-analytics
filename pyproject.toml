@@ -3,6 +3,10 @@
 asyncio_mode = "auto"
 # Новый event loop для каждой тест-функции (чистое окружение)
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore::PendingDeprecationWarning",
+    "ignore::DeprecationWarning",
+]
 
 [tool.alembic]
 # Путь к каталогу миграций (относительно pyproject.toml)

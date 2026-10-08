@@ -31,7 +31,7 @@ try:
 except Exception as e:
     storage = None
     MINIO_AVAILABLE = False
-    logger.error("[YOLO Consumer] WARNING: MinIO not available: %s", e)
+    logger.error(f"[YOLO Consumer] WARNING: MinIO not available: {e}")
     logger.error("[YOLO Consumer] Stream frames will NOT be saved!")
 
 
@@ -71,7 +71,7 @@ class YOLOConsumer:
             return False
 
     def run(self):
-        logger.info("YOLO consumer listening to '%s'...", TOPIC_RAW_FRAMES)
+        logger.info(f"YOLO consumer listening to '{TOPIC_RAW_FRAMES}'...")
         if MINIO_AVAILABLE:
             logger.info("[YOLO Consumer] Stream frames WILL be saved to MinIO")
         else:
@@ -85,16 +85,17 @@ class YOLOConsumer:
                 if msg is None:
                     continue
                 if msg.error():
-                    logger.error("Consumer error: %s", msg.error())
+                    logger.error(f"Consumer error: {msg.error()}")
                     continue
 
                 try:
                     self._handle(msg)
                 except Exception:
                     self.poison_count += 1
+                    topic_name = msg.topic()
+                    offset = msg.offset()
                     logger.exception(
-                        "Poison message skipped: topic=%s offset=%s (total %d)",
-                        msg.topic(), msg.offset(), self.poison_count,
+                        f"Poison message skipped: topic={topic_name} offset={offset} (total {self.poison_count})",
                     )
 
         except KeyboardInterrupt:
@@ -151,11 +152,9 @@ class YOLOConsumer:
 
         self.producer.produce(TOPIC_DETECTIONS, value=detection_msg)
         self.producer.poll(0)
+        saved_text = (' → saved to MinIO' if saved else '')
         logger.debug(
-            "Frame #%s: %s detections%s",
-            data["frame_index"],
-            len(objects),
-            " → saved to MinIO" if saved else "",
+            f"Frame #{data['frame_index']}: {len(objects)} detections{saved_text}",
         )
 
 

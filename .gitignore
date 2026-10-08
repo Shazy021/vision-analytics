@@ -11,6 +11,7 @@ venv/
 .idea/
 *.swp
 *~
+.continue
 
 # OS
 .DS_Store

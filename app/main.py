@@ -1,10 +1,19 @@
 """
 Главный файл FastAPI-приложения.
 """
+import logging
 from fastapi import FastAPI
 from app.api.routes import videos, analytics, streams
 from app.core.database import init_db
 from contextlib import asynccontextmanager
+
+# Настройка логгера для этого модуля
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -24,9 +33,9 @@ async def lifespan(app):
         # Это спасает диск от переполнения: 1 стрим = ~24 GB/день.
         # Видео (videos/) НЕ затрагиваются — они загружены пользователем.
         storage.set_stream_frames_ttl(days=7)
-        print("[Startup] MinIO bucket ready + stream frames TTL=7d")
+        logger.info("[Startup] MinIO bucket ready + stream frames TTL=7d")
     except Exception as e:
-        print(f"[Startup] MinIO not available yet: {e}")
+        logger.warning(f"[Startup] MinIO not available yet: {e}")
 
     yield
     # Shutdown (если нужно — добавляем сюда)
