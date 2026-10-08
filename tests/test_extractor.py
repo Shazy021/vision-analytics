@@ -1,8 +1,10 @@
-import pytest
+
 import cv2
 import numpy as np
-import os
-from app.video.extractor import frame_generator, Frame, VideoCapture
+import pytest
+
+from app.video.extractor import Frame, VideoCapture, frame_generator
+
 
 # pytest-фикстура — подготавливает данные для тестов
 # scope="session" — создаётся один раз на все тесты в файле
@@ -19,7 +21,7 @@ def test_video(tmp_path_factory):
 
     for i in range(90): # 3 секунды * 30 фпс = 90 кадров
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(frame, str(i), (250, 250), 
+        cv2.putText(frame, str(i), (250, 250),
                     cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 255, 255), 3)
         writer.write(frame)
 
@@ -67,5 +69,5 @@ def test_video_capture_context_manager(test_video):
 def test_video_capture_invalid_path():
     """Невалидный путь - понятная ошибка"""
     with pytest.raises(ValueError, match="Cannot open video"):
-        with VideoCapture("nonexistent.mp4") as cap:
+        with VideoCapture("nonexistent.mp4") as _:
             pass

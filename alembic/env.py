@@ -1,15 +1,16 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+from app.core.config import settings
+from app.core.database import Base
+from app.db.models import Detection, Video  # noqa: F401 — импортируем чтобы Alembic их увидел
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-from app.core.config import settings
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
 # Interpret the config file for Python logging.
@@ -19,11 +20,6 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-from app.core.database import Base
-from app.db.models import Video, Detection  # noqa: F401 — импортируем чтобы Alembic их увидел
-
 target_metadata = Base.metadata
 
 

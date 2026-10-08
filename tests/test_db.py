@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.core.database import Base
-from app.db.models import Video, Detection
+from app.db.models import Detection, Video
 
 
 # ============================================================
@@ -107,7 +107,7 @@ def test_create_detection(db_session):
     detection = Detection(
         video_id=video.id,
         class_name="person",
-        confidence=0.95, 
+        confidence=0.95,
         bbox_x1=100.0,
         bbox_y1=200.0,
         bbox_x2=300.0,

@@ -7,14 +7,13 @@ Phase 4: Видео читается НАПРЯМУЮ из MinIO по HTTP.
 OpenCV (cv2.VideoCapture) поддерживает HTTP URL —
 никакого скачивания на диск.
 """
-import os
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core import storage
-from app.db.models import Video, Detection
+from app.core.config import settings
+from app.db.models import Detection, Video
 from app.detection.yolo import YOLODetector
 from app.video.extractor import VideoCapture
 
@@ -150,7 +149,7 @@ def process_video(video_id: int, db: Session) -> None:
 
         print(f"Processed video {video_id}: {len(all_detections)} detections found")
 
-    except Exception as e:
+    except Exception:
         video.status = "failed"
         db.commit()
         raise

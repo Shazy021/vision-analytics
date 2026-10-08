@@ -8,6 +8,7 @@ Celery = Worker + Broker + Backend
 - Worker — процесс, который берёт задачи из очереди и выполняет
 """
 from celery import Celery
+
 from app.core.config import settings
 
 celery_app = Celery(

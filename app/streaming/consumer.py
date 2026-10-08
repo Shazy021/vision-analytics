@@ -1,18 +1,20 @@
 """Kafka Consumer — читает детекции и сохраняет в БД"""
-import logging
 import json
+import logging
+
 from confluent_kafka import Consumer
 
-# Настройка логгера
+from app.core.database import SessionLocal
+from app.db.models import Detection
+from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_DETECTIONS
+
+# Настройка логгера (после импортов — E402)
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
-from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_DETECTIONS
-from app.core.database import SessionLocal
-from app.db.models import Detection
 
 
 class DetectionConsumer:

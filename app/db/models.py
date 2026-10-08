@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Index
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+
 from app.core.database import Base
 
 # Base - базовый класс для всех моделей SQLAlchemy

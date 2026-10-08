@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
-from app.db.models import Video, Detection
+from app.db.models import Detection, Video
 from app.main import app
 
 

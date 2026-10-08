@@ -2,11 +2,11 @@
 Аналитические эндпоинты — агрегация данных по детекциям.
 """
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
 
 from app.core.database import get_db
-from app.db.models import Video, Detection
+from app.db.models import Detection, Video
 
 router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
 

@@ -1,6 +1,9 @@
 from dataclasses import dataclass
+
 from ultralytics import YOLO
+
 from app.core.config import settings
+
 
 @dataclass
 class Detection:
@@ -17,10 +20,10 @@ class YOLODetector:
     def __init__(self, weights_path: str = None, device: str = None):
         """
         Грузим модель при создании объекта
-        
+
         weights_path: путь к файлу весов (.pt)
         device: "cpu" или "cuda" (GPU)
-        
+
         Если не указаны — берём из .env
         """
         weights_path = weights_path or settings.weights_path
@@ -32,23 +35,23 @@ class YOLODetector:
     def detect(self, frame, frame_index: int = 0, timestamp: float = 0.0, conf: float = 0.25) -> list[Detection]:
         """
          Детекция объектов на одном кадре.
-        
+
         Аргументы:
             frame: numpy-массив — картинка из OpenCV
             frame_index: номер кадра (для записи в результат)
             timestamp: время кадра в секундах
             conf: порог уверенности, всё ниже — отбрасывается
-        
+
         Возвращает:
             Список Detection — найденные объекты
         """
         results = self.model(frame, conf=conf, device=self.device, verbose=False)
         return self._parse_results(results[0], frame_index, timestamp)
-    
+
     def detect_batch(self, frames: list, conf: float = 0.25) -> list[list[Detection]]:
         """
         Детекция на нескольких кадрах сразу (батчами).
-        
+
         Зачем: GPU эффективнее обрабатывает несколько картинок
         одновременно (параллелизм на уровне чипа).
         На CPU разницы почти нет.
@@ -62,16 +65,16 @@ class YOLODetector:
             all_detections.append(detections)
 
         return all_detections
-    
+
     def _parse_results(self, result, frame_index: int, timestamp: float) -> list[Detection]:
         """
         Конвертация результата Ultralytics в наш формат Detection.
-        
+
         result.boxes — объект с найденными боксами
         result.boxes.cls — номера классов (0=person, 2=car, ...)
         result.boxes.conf — уверенность для каждого бокса
         result.boxes.xyxy — координаты [x1, y1, x2, y2]
-        
+
         result.names — словарь {0: "person", 1: "bicycle", 2: "car", ...}
         """
         detections = []
@@ -79,7 +82,7 @@ class YOLODetector:
         # Если ничего не нашли - пустой список
         if result.boxes is None or len(result.boxes) == 0:
             return detections
-        
+
         for i in range(len(result.boxes)):
             class_id = int(result.boxes.cls[i])
             class_name = result.names[class_id]
@@ -96,4 +99,3 @@ class YOLODetector:
             ))
 
         return detections
-    

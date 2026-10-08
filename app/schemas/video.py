@@ -8,7 +8,9 @@ Pydantic-схемы для Video — определяют формат отве�
 4. Вычисляемые поля: например, detections_count — в БД нет, но API возвращает
 """
 from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict
+
 
 # ============================================================
 # БАЗОВАЯ СХЕМА — общие поля для создания и чтения

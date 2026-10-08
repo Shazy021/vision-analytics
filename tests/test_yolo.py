@@ -1,7 +1,9 @@
-import pytest
-import numpy as np
 from unittest.mock import MagicMock, patch
-from app.detection.yolo import YOLODetector, Detection
+
+import numpy as np
+import pytest
+
+from app.detection.yolo import Detection, YOLODetector
 
 # =========================================
 # Мок — подмена реального объекта на фейковый
@@ -28,18 +30,18 @@ def mock_model():
     cls_values = {0: 2, 1: 0}  # Индекс 0 → класс 2(car), Индекс 1 → класс 0(person)
     conf_values = {0: 0.9, 1: 0.7}
     bbox_values = {0: [100, 80, 300, 200], 1: [50, 60, 150, 400]}
-    
+
     fake_boxes.cls.__getitem__ = lambda self, i: cls_values[i]
     fake_boxes.conf.__getitem__ = lambda self, i: conf_values[i]
     fake_boxes.xyxy.__getitem__ = lambda self, i: MagicMock(tolist=lambda: bbox_values[i])
-    
+
     fake_result = MagicMock()
     fake_result.boxes = fake_boxes
     fake_result.names = {0: "person", 2: "car"}
 
     # model(...) возвращает список с одним результатом
     model.return_value = [fake_result]
-    
+
     return model
 
 def test_detect_returns_detections(mock_model):
@@ -81,7 +83,7 @@ def test_detect_empty_result(mock_model):
 
         fake_frame = np.zeros((480, 640, 3), dtype=np.uint8)
         detections = detector.detect(fake_frame)
-        
+
         assert detections == []
 
 def test_detection_dataclass():

@@ -1,6 +1,8 @@
 import logging
+
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import declarative_base, sessionmaker
+
 from app.core.config import settings
 
 # Настройка логгера
@@ -29,10 +31,10 @@ Base = declarative_base()
 def get_db():
     """
     Каждому запросу к API — своя сессия с БД.
-    
+
     with next(get_db()) as db:
         video = db.query(Video).first()
-    
+
     После обработки запроса — сессия закрывается автоматически.
     """
     db = SessionLocal()
@@ -43,7 +45,7 @@ def get_db():
 
 def init_db():
     """Создаёт все таблицы по моделям (без Alembic)."""
-    from app.db.models import Video, Detection  # noqa: F401
+    from app.db.models import Detection, Video  # noqa: F401
     Base.metadata.create_all(bind=engine)
 
 
