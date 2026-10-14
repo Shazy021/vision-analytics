@@ -47,8 +47,36 @@ client = Minio(
     access_key=settings.s3_access_key,
     secret_key=settings.s3_secret_key,
     secure=False,
+    region="us-east-1",
     http_client=_HTTP_CLIENT,
 )
+
+# Presigned URL живут в двух мирах:
+#   - серверная часть (cv2 seek в api, fetch кадров дашбордом из контейнера)
+#     ходит по ВНУТРЕННЕМУ хосту (minio:9000);
+#   - браузер (st.video) получает ссылку напрямую и обязан достучаться до
+#     MinIO по АДРЕСУ С МАШИНЫ ПОЛЬЗОВАТЕЛЯ (http://localhost:9000).
+# Хост участвует в подписи SigV4, поэтому подмена хоста в готовой ссылке
+# ломает подпись —.presign делаем отдельным клиентом на публичном endpoint.
+_presign_client = client
+if settings.s3_public_endpoint:
+    _public_url = urlparse(
+        settings.s3_public_endpoint
+        if settings.s3_public_endpoint.startswith("http")
+        else f"http://{settings.s3_public_endpoint}"
+    )
+    _presign_client = Minio(
+        f"{_public_url.hostname}:{_public_url.port or 9000}",
+        access_key=settings.s3_access_key,
+        secret_key=settings.s3_secret_key,
+        secure=(_public_url.scheme == "https"),
+        # region задаём явно: без него minio-py перед presign'ом ходит на
+        # GetBucketLocation к СВОЕМУ endpoint — а это localhost:9000, куда
+        # из контейнера нет доступа (ConnectionRefused → video_url=None).
+        region="us-east-1",
+        http_client=_HTTP_CLIENT,
+    )
+    logger.info(f"[Storage] Public presign endpoint: {_public_url.hostname}")
 
 def ensure_bucket():
     """Создать бакет если не существует."""
@@ -88,10 +116,19 @@ def get_bytes(object_name: str) -> bytes:
         response.release_conn()
 
 
-def get_presigned_url(object_name: str, expires_hours: int = 1) -> str:
-    """Получить временную ссылку на файл."""
+def get_presigned_url(object_name: str, expires_hours: int = 1, public: bool = False) -> str:
+    """
+    Получить временную ссылку на файл.
+
+    public=True — ссылка для БРАУЗЕРА (st.video в дашборде): подписываем
+    через S3_PUBLIC_ENDPOINT, чтобы браузер достучался до MinIO.
+    public=False — ссылка для серверной части (cv2, дашборд из контейнера):
+    внутренний S3_ENDPOINT.
+    """
     from datetime import timedelta
-    return client.presigned_get_object(
+    return _presign_client.presigned_get_object(
+        BUCKET, object_name, expires=timedelta(hours=expires_hours)
+    ) if public else client.presigned_get_object(
         BUCKET, object_name, expires=timedelta(hours=expires_hours)
     )
 
@@ -115,6 +152,22 @@ def delete_prefix(prefix: str):
     objects = client.list_objects(BUCKET, prefix=prefix, recursive=True)
     for obj in objects:
         client.remove_object(BUCKET, obj.object_name)
+
+
+def list_objects(prefix: str, recursive: bool = True):
+    """
+    Список объектов с заданным префиксом.
+
+    Возвращает список строк object_name (например,
+    ["streams/1/100.jpg", "streams/1/105.jpg", ...]).
+
+    Используется для поиска последнего кадра стрима:
+    даём prefix=f"streams/{stream_id}/" и берём max() по имени.
+    """
+    try:
+        return [obj.object_name for obj in client.list_objects(BUCKET, prefix=prefix, recursive=recursive)]
+    except S3Error:
+        return []
 
 
 def set_stream_frames_ttl(days: int = 7):

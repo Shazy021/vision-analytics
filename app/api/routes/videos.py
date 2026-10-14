@@ -2,7 +2,8 @@ import os
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+import cv2
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -129,10 +130,13 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
     video_read = VideoRead.model_validate(video)
     video_read.detections_count = count
 
-    # Presigned URL — дашборд может открыть видео напрямую из MinIO
+    # Presigned URL — дашборд может открыть видео напрямую из MinIO.
+    # public=True: ссылку открывает БРАУЗЕР в <video>, значит хост должен
+    # быть доступен с машины пользователя (S3_PUBLIC_ENDPOINT), а не
+    # внутреннее имя minio:9000 из docker-сети.
     if video.object_key:
         try:
-            video_read.video_url = storage.get_presigned_url(video.object_key)
+            video_read.video_url = storage.get_presigned_url(video.object_key, public=True)
         except Exception:
             pass  # MinIO недоступен — без URL
 
@@ -186,6 +190,189 @@ def get_video_frame(video_id: int, timestamp: float, db: Session = Depends(get_d
         "timestamp": timestamp,
         "video_url": video_url,
     }
+
+
+@router.get("/{video_id}/frame-image")
+def get_video_frame_image(
+    video_id: int,
+    timestamp: float = Query(..., description="Секунда от начала видео"),
+    db: Session = Depends(get_db),
+):
+    """
+    Извлечь ОДИН кадр из видео по таймстампу и отдать как JPEG.
+
+    Используется для превью в дашборде: ползунок таймлайна двигается —
+    фронт запрашивает кадр как картинку, поверх рисуются боксы детекций
+    (matplotlib/PIL). Streamlit нативно показывает st.image(JPEG bytes),
+    а видео-плеер с оверлеем боксов в нём сделать тяжело.
+
+    Под капотом:
+      1. Берём presigned URL на видео в MinIO.
+      2. cv2.VideoCapture(url) — OpenCV через FFmpeg читает по HTTP.
+      3. cap.set(CAP_PROP_POS_MSEC, timestamp*1000) — seek на нужную секунду.
+      4. Кодируем кадр в JPEG и отдаём как Response.
+
+    Альтернатива через /frame (возвращает video_url+timestamp) — работает,
+    но требует HTML5 <video>-плеера с программным seek, что в Streamlit
+    нормально не делается. JPEG-кадр — универсальнее.
+    """
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if not video.object_key:
+        raise HTTPException(status_code=404, detail="Video file not in S3")
+
+    try:
+        video_url = storage.get_presigned_url(video.object_key, expires_hours=1)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to generate video URL")
+
+    # cv2.VideoCapture умеет открывать http(s):// URL через FFmpeg-backend.
+    # seek по времени (CAP_PROP_POS_MSEC) точнее, чем по frame_index —
+    # не нужно знать FPS источника, OpenCV сам переведёт.
+    cap = cv2.VideoCapture(video_url)
+    if not cap.isOpened():
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to open video stream from MinIO (FFmpeg/CV2 issue)",
+        )
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000.0)
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Failed to read frame at t={timestamp}s (out of range?)",
+            )
+
+        # Кодируем в JPEG. Качество 90 — достаточно для превью,
+        # не раздуваем трафик между api-контейнером и браузером.
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            raise HTTPException(status_code=500, detail="Failed to encode frame as JPEG")
+
+        return Response(content=buf.tobytes(), media_type="image/jpeg")
+    finally:
+        cap.release()
+
+
+@router.get("/{video_id}/detections")
+def video_detections(
+    video_id: int,
+    limit: int = 100,
+    start_ts: float | None = Query(
+        None,
+        description="Нижняя граница timestamp (секунды от начала видео).",
+    ),
+    end_ts: float | None = Query(
+        None,
+        description="Верхняя граница timestamp (секунды от начала видео).",
+    ),
+    closest_ts: float | None = Query(
+        None,
+        description="Если задано — вернуть ТОЛЬКО детекции ближайшего обработанного "
+                    "кадра с timestamp <= closest_ts. Это решает «кашу из боксов»: "
+                    "при диапазоне ±0.5с в окно попадает ~5 обработанных кадров "
+                    "(extract_fps=5 → шаг 0.2с) и их боксы накладываются друг на друга. "
+                    "Параметр ищет MAX(timestamp) WHERE timestamp <= closest_ts "
+                    "и фильтрует детекции строго по этому timestamp.",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Детекции для видео с тремя режимами фильтрации по времени:
+
+    1. Без параметров — последние N по времени.
+    2. start_ts / end_ts — диапазон (для трекинга движения по окну).
+    3. closest_ts — ОДИН ближайший обработанный кадр (для оверлея на превью).
+       Возвращает боксы ровно одного timestamp — без «каши».
+    """
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Режим closest_ts — приоритетный, остальные параметры игнорируем
+    if closest_ts is not None:
+        # Шаг 1: найти MAX(timestamp) WHERE timestamp <= closest_ts
+        closest_row = (
+            db.query(Detection.timestamp)
+            .filter(
+                Detection.video_id == video_id,
+                Detection.timestamp <= closest_ts,
+            )
+            .order_by(Detection.timestamp.desc())
+            .limit(1)
+            .first()
+        )
+        if not closest_row:
+            # Нет детекций раньше closest_ts — попробуем ближайший ПОСЛЕ
+            closest_row = (
+                db.query(Detection.timestamp)
+                .filter(Detection.video_id == video_id)
+                .order_by(Detection.timestamp.asc())
+                .limit(1)
+                .first()
+            )
+            if not closest_row:
+                return []
+
+        target_ts = closest_row[0]
+        detections = (
+            db.query(Detection)
+            .filter(
+                Detection.video_id == video_id,
+                Detection.timestamp == target_ts,
+            )
+            .all()
+        )
+        return [
+            {
+                "id": d.id,
+                "frame_index": d.frame_index,
+                "timestamp": d.timestamp,
+                "class_name": d.class_name,
+                "confidence": d.confidence,
+                "video_id": d.video_id,
+                "bbox": [d.bbox_x1, d.bbox_y1, d.bbox_x2, d.bbox_y2],
+            }
+            for d in detections
+        ]
+
+    # Режим диапазона
+    query = db.query(Detection).filter(Detection.video_id == video_id)
+
+    if start_ts is not None:
+        query = query.filter(Detection.timestamp >= start_ts)
+    if end_ts is not None:
+        query = query.filter(Detection.timestamp <= end_ts)
+
+    # Если фильтр по времени есть — сортируем по возрастанию timestamp
+    # (боксы идут в естественном порядке, не «последние сверху»).
+    # Иначе — последние N по времени.
+    if start_ts is not None or end_ts is not None:
+        detections = query.order_by(Detection.timestamp.asc()).limit(max(limit, 500)).all()
+    else:
+        detections = (
+            query
+            .order_by(Detection.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
+
+    return [
+        {
+            "id": d.id,
+            "frame_index": d.frame_index,
+            "timestamp": d.timestamp,
+            "class_name": d.class_name,
+            "confidence": d.confidence,
+            "video_id": d.video_id,
+            "bbox": [d.bbox_x1, d.bbox_y1, d.bbox_x2, d.bbox_y2],
+        }
+        for d in detections
+    ]
 
 
 @router.delete("/{video_id}")

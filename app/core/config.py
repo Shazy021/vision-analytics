@@ -55,6 +55,12 @@ class Settings(BaseSettings):
 
     # --- S3 (MinIO) ---
     s3_endpoint: str = "http://localhost:9000"
+    # Публично доступный адрес MinIO для presigned URL, которые открывает
+    # БРАУЗЕР (например st.video в дашборде). Внутри docker S3_ENDPOINT —
+    # это http://minio:9000, и браузер такой хост не резолвит → видео не
+    # играется. Сюда пишут адрес, доступный с машины разработчика
+    # (обычно http://localhost:9000). Пусто = использовать s3_endpoint.
+    s3_public_endpoint: str = ""
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin123"
     s3_bucket: str = "vision"
