@@ -86,6 +86,41 @@ class FrameProducer:
             f"Не удалось открыть источник {self.source!r} за {OPEN_ATTEMPTS} попыток. {hint}"
         )
 
+    def _initial_frame_index(self) -> int:
+        """
+        Продолжить нумерацию кадров после рестарта стрима.
+
+        frame_index — это ключ кадра в MinIO (streams/{id}/{idx}.jpg), а
+        дашборд в /latest-frame берёт max() по этим ключам. Если после
+        каждого рестарта начинать с 0, новые кадры перезаписывают старые
+        ключи, max() навсегда залипает на значении из первого запуска —
+        и превью «стоит на одном кадре», хотя детекции в БД капают.
+
+        Стартуем с max(frame_index) из БД: кадры в MinIO сохраняются только
+        при наличии детекций, поэтому в БД есть запись на каждый сохранённый
+        кадр и этот максимум гарантированно >= любого существующего ключа.
+        """
+        if self.stream_id is None:
+            return 0
+        try:
+            from sqlalchemy import func
+
+            from app.core.database import SessionLocal
+            from app.db.models import Detection
+
+            with SessionLocal() as db:
+                max_idx = (
+                    db.query(func.max(Detection.frame_index))
+                    .filter(Detection.stream_id == self.stream_id)
+                    .scalar()
+                )
+            if max_idx:
+                logger.info("Продолжаю нумерацию кадров с %d (было в БД)", max_idx + 1)
+                return max_idx + 1
+        except Exception:
+            logger.exception("Не удалось прочитать max frame_index — стартую с 0")
+        return 0
+
     def run(self):
         cap = self._open_capture()
 
@@ -97,7 +132,9 @@ class FrameProducer:
 
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
         frame_interval = max(1, int(src_fps / self.fps))
-        frame_index = 0  # сквозной счётчик прочитанных кадров (ключ кадра в MinIO)
+        # сквозной счётчик прочитанных кадров (ключ кадра в MinIO);
+        # продолжается с прошлого максимума — см. _initial_frame_index()
+        frame_index = self._initial_frame_index()
         sent_count = 0
 
         # Для файлов эмулируем реальное время: RTSP и так идёт в реальном темпе
