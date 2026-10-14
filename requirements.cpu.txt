@@ -32,6 +32,10 @@ opencv-python-headless==4.13.0.92
 streamlit==1.38.0
 plotly==5.24.0
 requests==2.32.3
+# matplotlib + Pillow: рисование боксов поверх кадров в превью
+# дашборда (draw_boxes_on_image в dashboard/app.py).
+matplotlib==3.9.2
+Pillow==10.4.0
 
 # --- Celery / Kafka / S3 ---
 celery==5.4.0
