@@ -31,6 +31,11 @@ docker-compose up -d
 
 > 🔐 Пароли/ключи задаются переменными в `.env` (${VAR:-default} в compose).
 > В репозитории только безопасные дев-дефолты — для прода переопредели их в `.env`.
+>
+> 🌐 `S3_PUBLIC_ENDPOINT` (дефолт `http://localhost:9000`) — адрес MinIO для
+> presigned URL, которые открывает **браузер** (видео-плеер в дашборде).
+> Браузер не резолвит docker-имена, поэтому ссылка должна быть по адресу
+> с проброшенным портом. Внутренние запросы контейнеров идут на `S3_ENDPOINT`.
 
 > 💻 **GPU определяется автоматически.** Скрипты старта проверяют наличие NVIDIA
 > (nvidia-smi) и подключают GPU-резервы из `docker-compose.gpu.yml` только на
@@ -80,6 +85,8 @@ curl -X POST http://localhost:8000/api/videos/upload \
 ```
 
 Видео обработается автоматически: Celery Worker → YOLO → PostgreSQL.
+Готовое видео доступно в дашборде: **синхронный двойной плеер** — чистый кадр
+и кадр с боксами бок-о-бок на одном общем таймлайне.
 
 ### RTSP-стриминг (симуляция камерой)
 
@@ -202,7 +209,10 @@ pre-commit install
 |--------|------|-------------|
 | POST | /api/videos/upload | Загрузить видео и запустить обработку |
 | GET | /api/videos | Список всех видео |
-| GET | /api/videos/{id} | Информация о видео |
+| GET | /api/videos/{id} | Информация о видео (+ video_url для браузера) |
+| GET | /api/videos/{id}/status | Статус обработки |
+| GET | /api/videos/{id}/frame-image?timestamp=N | Кадр по времени как JPEG |
+| GET | /api/videos/{id}/detections?closest_ts=N | Детекции (диапазон / ближайший кадр) |
 | DELETE | /api/videos/{id} | Удалить видео |
 
 ### Стримы
@@ -214,6 +224,7 @@ pre-commit install
 | DELETE | /api/streams/{id} | Удалить стрим |
 | POST | /api/streams/{id}/start | Запустить обработку |
 | POST | /api/streams/{id}/stop | Остановить обработку |
+| GET | /api/streams/{id}/latest-frame | Последний кадр стрима (превью) |
 | GET | /api/streams/{id}/detections | Детекции стрима |
 
 ### Аналитика
@@ -234,6 +245,7 @@ pre-commit install
 | Kafka | `kafka:29092` | `localhost:9092` |
 | MediaMTX | `mediamtx:8554` | `localhost:8554` |
 | FastAPI | `api:8000` | `localhost:8000` |
+| MinIO (S3 API) | `minio:9000` | `localhost:9000` |
 
 ## Kafka Topics
 
