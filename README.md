@@ -108,26 +108,26 @@ ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transp
 - URL: `rtsp://mediamtx:8554/mystream` (из Docker-сети)
 - FPS: 5
 
-**Шаг 3.** Нажать ▶️ Запустить — запустится Frame Producer как subprocess.
+**Шаг 3.** Нажать ▶️ Запустить — API запишет намерение (`desired_status=active`), а сервис `stream_manager` поднимет Frame Producer subprocess'ом.
 
 Пайплайн: Producer → Kafka (`raw_frames`) → YOLO Consumer → Kafka (`detections`) → Detection Consumer → PostgreSQL.
 
 ### Стримы не работают — чек-лист
 
-Механика: кнопка ▶️ Запустить стартует producer как **subprocess внутри контейнера api**.
-Если источник не открылся — процесс умирает, а статус через пару секунд снова станет `inactive`
-(повторный «Запустить» вернёт 200, а не «already running» — так легко отследить мёртвый producer).
+Механика: кнопка ▶️ Запустить пишет намерение (`desired_status=active`) в БД, а **reconciler в контейнере `stream_manager`** поднимает producer subprocess'ом и следит, чтобы он оставался живым.
+Если источник не открылся — процесс умирает, reconciler переподнимает его; после 3 быстрых падений подряд стрим получит статус `error` с причиной и остановится (защита от spawn-шторма).
+Чтобы повторить попытку после `error` — нажми ⏹ Стоп, затем ▶️ Запустить. Повторный «Запустить» на живом стриме вернёт 200 (API не знает и не должен знать про живость процесса).
 
-**1. Смотри логи producer'а** — он пишет прямо в лог api-контейнера:
+**1. Смотри логи producer'а** — владелец процесса теперь `stream-manager`, туда и пишет producer:
 
 ```bash
-docker compose logs api --tail 50
+docker compose logs stream-manager --tail 50
 ```
 
 Там будет либо причина падения с трейсбеком, либо прогресс «Отправлено кадров: N».
 
 **2. Типовая причина №1 — адрес источника не виден из контейнера.**
-Producer работает внутри api, и `localhost` внутри контейнера — это сам контейнер, а не твоя машина:
+Producer работает внутри `stream-manager`, и `localhost` внутри контейнера — это сам контейнер, а не твоя машина:
 
 | Откуда источник | URL для стрима |
 |---|---|

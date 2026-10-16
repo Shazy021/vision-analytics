@@ -70,7 +70,7 @@ re-upload it. It reads via presigned URL.
 ### 4. Streams (Kafka Pipeline)
 
 ```
-RTSP URL -> app.streaming.producer.FrameProducer (subprocess, spawned by API)
+RTSP URL -> app.streaming.producer.FrameProducer (subprocess, spawned by stream_manager)
     |
 Reads RTSP via OpenCV.VideoCapture (forced TCP transport in Docker)
     |
@@ -92,11 +92,15 @@ Kafka topic "detections"
                - Write Detection rows to PostgreSQL (with stream_id)
 ```
 
-Stream lifecycle:
-1. `POST /api/streams` — create Stream row (status: inactive)
-2. `POST /api/streams/{id}/start` — spawn `python -m app.streaming.producer` as subprocess
-3. `POST /api/streams/{id}/stop` — terminate subprocess
-4. `DELETE /api/streams/{id}` — stop + delete frames from MinIO + delete DB row
+Stream lifecycle (desired-state + reconciler pattern):
+1. `POST /api/streams` — create Stream row (`desired_status`: inactive)
+2. `POST /api/streams/{id}/start` — write `desired_status=active` (the API spawns NOTHING)
+3. `POST /api/streams/{id}/stop` — write `desired_status=inactive`
+4. `DELETE /api/streams/{id}` — delete row + delete frames from MinIO
+
+The API is only an "intent writer": it records `desired_status` in the DB. The
+actual producer processes are owned by a separate service, `stream_manager`
+(`app/streaming/manager.py`) — see the "Stream supervision" section below.
 
 Frame numbering (`frame_index`) is continuous: on start, the producer resumes
 counting from `max(frame_index)` in the DB (`FrameProducer._initial_frame_index()`).
@@ -105,8 +109,29 @@ Without this, restarting a stream reset the counter, new frames overwrote old
 those keys) stuck on the first-run maximum forever — the dashboard preview
 "froze on a single frame".
 
-Known limitation: subprocesses are tracked in an in-memory dict
-(`_running_processes`). They do not survive API restart.
+### Stream supervision (desired-state + reconciler)
+
+Previously the API spawned the producer itself and kept live `Popen` handles in
+an in-memory dict (`_running_processes`). That caused three bugs: an API restart
+killed every stream, a crashed producer never came back, and two API instances
+fought over the same stream.
+
+We now split INTENT from FACT (like Kubernetes controllers):
+- `Stream.desired_status` (active/inactive) — intent, written only by the API;
+- `Stream.status` (active/inactive/error) — fact, written only by `stream_manager`;
+- `Stream.status_reason` — diagnosis when `status=error`.
+
+`stream_manager` runs a reconcile loop: each pass reads desired from the DB,
+compares it against its live child processes and converges them — spawning
+missing producers and killing ones no longer desired. A pass is idempotent
+(live producers are left alone), so an API restart is irrelevant to streams and
+a crashed producer is respawned automatically.
+
+Backoff against a spawn storm: if a producer dies sooner than `CRASH_WINDOW`
+(10s) after start, that counts as a crash; after `MAX_FAST_CRASHES` (3) rapid
+crashes in a row the stream gets `status=error` with a reason and is no longer
+respawned until the user does `stop` → `start` (which removes it from desired
+and clears the state).
 
 ---
 
@@ -242,8 +267,8 @@ Client polls GET /api/videos/{id}/status -> "completed"
 ### Path B: RTSP Stream
 
 ```
-1. POST /api/streams           -> create Stream row (inactive)
-2. POST /api/streams/{id}/start -> spawn producer subprocess
+1. POST /api/streams           -> create Stream row (desired inactive)
+2. POST /api/streams/{id}/start -> desired_status=active; stream_manager spawns the subprocess
     |
     v
 FrameProducer: read RTSP -> encode JPEG -> publish Kafka "raw_frames"
@@ -301,6 +326,7 @@ Services in `docker-compose.yml`:
 | `kafka-init` | cp-kafka:7.6.0 | — | One-shot: create topics |
 | `yolo-consumer` | vap-cuda | — | Kafka -> YOLO -> detections |
 | `detection-consumer` | vap-cpu | — | Kafka -> PostgreSQL |
+| `stream-manager` | vap-cpu | — | Reconciler: owns producer subprocesses |
 | `mediamtx` | bluenviron/mediamtx | 8554 | RTSP server (camera simulation) |
 | `minio` | minio/minio | 9000, 9001 | Object storage + web console |
 
@@ -323,11 +349,16 @@ Parallelism via `deploy.replicas: 2` (independent containers).
 - 1 stream ≈ 24 GB/day at 5 FPS; filtering saves ~80% storage
 - Lifecycle rule auto-deletes frames older than 7 days
 
-### Why subprocess for stream producers?
-- Producer is a long-running blocking loop (reads RTSP forever)
-- Cannot run inside async FastAPI event loop
-- Logs flow into `docker compose logs api` for debugging
-- Known limitation: does not survive API restart (tracked in memory dict)
+### Why do producer processes belong to a separate stream_manager (reconciler)?
+- A producer is a long-running blocking loop (reads RTSP forever) and cannot run
+  inside FastAPI's async event loop → it must be a separate process
+- Ownership is moved out of the API: restarting/scaling the API neither kills
+  nor duplicates streams (previously `Popen` lived in api memory and died with it)
+- One owner = one source of truth: two API instances don't fight over one stream
+- The reconcile loop respawns a crashed producer on its own; backoff (see the
+  Stream supervision section) prevents a spawn storm on a broken RTSP URL
+- Producer logs now land in `docker compose logs stream-manager` (where the
+  owner lives), not in the api logs
 
 ### Why does the producer resume frame_index from the DB?
 - `frame_index` is the frame key in MinIO (`streams/{id}/{index}.jpg`), and

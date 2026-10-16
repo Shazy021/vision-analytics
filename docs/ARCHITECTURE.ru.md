@@ -70,7 +70,7 @@ app.pipeline.processor.process_video()
 ### 4. Стримы (Kafka Pipeline)
 
 ```
-RTSP URL -> app.streaming.producer.FrameProducer (subprocess, запускается API)
+RTSP URL -> app.streaming.producer.FrameProducer (subprocess, запускается stream_manager)
     |
 Читает RTSP через OpenCV.VideoCapture (принудительный TCP-транспорт в Docker)
     |
@@ -92,11 +92,15 @@ Kafka топик "detections"
                - Записывает строки Detection в PostgreSQL (со stream_id)
 ```
 
-Жизненный цикл стрима:
-1. `POST /api/streams` — создать запись Stream (статус: inactive)
-2. `POST /api/streams/{id}/start` — запустить `python -m app.streaming.producer` как subprocess
-3. `POST /api/streams/{id}/stop` — завершить subprocess
-4. `DELETE /api/streams/{id}` — остановить + удалить кадры из MinIO + удалить запись из БД
+Жизненный цикл стрима (паттерн desired-state + reconciler):
+1. `POST /api/streams` — создать запись Stream (`desired_status`: inactive)
+2. `POST /api/streams/{id}/start` — записать `desired_status=active` (API НИЧЕГО не спавнит)
+3. `POST /api/streams/{id}/stop` — записать `desired_status=inactive`
+4. `DELETE /api/streams/{id}` — удалить запись + удалить кадры из MinIO
+
+API — только «заказчик»: пишет намерение (`desired_status`) в БД. Реальными
+процессами producer'а владеет отдельный сервис `stream_manager`
+(`app/streaming/manager.py`) — см. § «Stream supervision» ниже.
 
 Нумерация кадров (`frame_index`) сквозная: при старте producer продолжает
 счёт от `max(frame_index)` из БД (`FrameProducer._initial_frame_index()`).
@@ -104,8 +108,26 @@ Kafka топик "detections"
 ключи `streams/{id}/{index}.jpg`, и `/latest-frame` (берёт `max()` по ключам)
 навсегда залипал на старом максимуме — превью «стояло на одном кадре».
 
-Известное ограничение: subprocess'ы отслеживаются в словаре в памяти
-(`_running_processes`). Они не переживают рестарт API.
+### Stream supervision (desired-state + reconciler)
+
+Раньше API сам спавнил producer'а и держал живые `Popen` в словаре в памяти
+(`_running_processes`). Отсюда три бага: рестарт API убивал все стримы,
+упавший producer не поднимался, а два экземпляра API дрались за один стрим.
+
+Теперь разделили НАМЕРЕНИЕ и ФАКТ (как контроллеры Kubernetes):
+- `Stream.desired_status` (active/inactive) — намерение, пишет только API;
+- `Stream.status` (active/inactive/error) — факт, пишет только `stream_manager`;
+- `Stream.status_reason` — диагноз при `status=error`.
+
+`stream_manager` крутит reconcile loop: каждый виток читает desired из БД,
+сравнивает со своими живыми дочерними процессами и сближает их — недостающих
+поднимает, лишних убивает. Виток идемпотентен (живых не трогает), поэтому
+рестарт API безразличен стримам, а упавший producer поднимается сам.
+
+Backoff от spawn-шторма: если producer умер раньше `CRASH_WINDOW` (10с) после
+старта, это краш; после `MAX_FAST_CRASHES` (3) быстрых падений подряд стрим
+получает `status=error` с причиной и больше не поднимается, пока пользователь
+не сделает `stop` → `start` (это снимает стрим с desired и очищает состояние).
 
 ---
 
@@ -242,8 +264,8 @@ Celery Worker: process_video()
 ### Путь Б: RTSP стрим
 
 ```
-1. POST /api/streams           -> создать запись Stream (inactive)
-2. POST /api/streams/{id}/start -> запустить subprocess producer
+1. POST /api/streams           -> создать запись Stream (desired inactive)
+2. POST /api/streams/{id}/start -> desired_status=active; stream_manager поднимет subprocess
     |
     v
 FrameProducer: читает RTSP -> кодирует JPEG -> публикует в Kafka "raw_frames"
@@ -301,6 +323,7 @@ DetectionConsumer: потребляет "detections" -> записывает с�
 | `kafka-init` | cp-kafka:7.6.0 | — | Одноразовый: создание топиков |
 | `yolo-consumer` | vap-cuda | — | Kafka -> YOLO -> детекции |
 | `detection-consumer` | vap-cpu | — | Kafka -> PostgreSQL |
+| `stream-manager` | vap-cpu | — | Reconciler: владеет процессами producer'ов |
 | `mediamtx` | bluenviron/mediamtx | 8554 | RTSP сервер (симуляция камеры) |
 | `minio` | minio/minio | 9000, 9001 | Объектное хранилище + веб-консоль |
 
@@ -324,11 +347,16 @@ Celery workers используют `--pool=solo`, потому что CUDA-ко
 - 1 стрим ≈ 24 ГБ/день при 5 FPS; фильтрация экономит ~80% хранилища
 - Lifecycle rule автоматически удаляет кадры старше 7 дней
 
-### Почему subprocess для producer'ов стримов?
-- Producer — это бесконечный блокирующий цикл (читает RTSP постоянно)
-- Не может работать внутри async event loop FastAPI
-- Логи попадают в `docker compose logs api` для отладки
-- Известное ограничение: не переживает рестарт API (отслеживается в словаре в памяти)
+### Почему producer'ами владеет отдельный stream_manager (reconciler)?
+- Producer — это бесконечный блокирующий цикл (читает RTSP постоянно), не может
+  работать внутри async event loop FastAPI → отдельный процесс
+- Владелец процессов вынесен из API: рестарт/масштабирование API не роняет и не
+  дублирует стримы (раньше `Popen` жили в памяти api и умирали вместе с ним)
+- Один владелец = одна истина: два экземпляра API не дерутся за один стрим
+- reconcile loop поднимает упавшего producer'а сам; backoff (см. § Stream
+  supervision) не даёт устроить spawn-шторм на битом RTSP URL
+- Логи producer'а теперь в `docker compose logs stream-manager` (там, где
+  владелец процесса), а не в логах api
 
 ### Почему producer продолжает frame_index из БД?
 - `frame_index` — это ключ кадра в MinIO (`streams/{id}/{index}.jpg`),
