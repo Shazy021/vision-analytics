@@ -130,6 +130,12 @@ class StreamManager:
             process=process,
             started_at=time.monotonic(),
         )
+        # Логируем pid: это точка, где процесс вообще рождается, — по pid удобно
+        # вручную убить producer'а в проверке «kill → reconciler поднимает».
+        logger.info(
+            "stream %s: producer поднят (pid=%s)",
+            stream.id, getattr(process, "pid", "?"),
+        )
         self._set_status(db, stream.id, "active", None)
 
     def _stop_child(self, stream_id: int) -> None:
