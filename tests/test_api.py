@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
-from app.db.models import Detection, Video
+from app.db.models import Detection, Stream, Video
 from app.main import app
 
 
@@ -198,3 +198,80 @@ def test_timeline(client_with_data):
         assert "time_start" in item
         assert "count" in item
         assert item["count"] > 0
+
+
+# ============================================================
+# ТЕСТЫ STREAM start/stop — API пишет ТОЛЬКО desired-состояние
+#
+# После перехода на паттерн desired-state + reconciler эндпоинты start/stop
+# ничего не спавнят: они лишь меняют Stream.desired_status. Реальными
+# процессами владеет stream_manager, поэтому здесь проверяем именно запись
+# намерения в БД, а не заведённый процесс.
+# ============================================================
+def _db_session():
+    """Сессия поверх того же движка, что использует TestClient (StaticPool)."""
+    return next(app.dependency_overrides[get_db]())
+
+
+def _create_stream(client):
+    r = client.post("/api/streams", json={"name": "cam", "rtsp_url": "rtsp://x", "fps": 5})
+    assert r.status_code == 201
+    return r.json()["id"]
+
+
+def test_start_stream_sets_desired_active(client):
+    sid = _create_stream(client)
+    r = client.post(f"/api/streams/{sid}/start")
+    assert r.status_code == 200
+    assert r.json()["desired_status"] == "active"
+
+    db = _db_session()
+    s = db.get(Stream, sid)
+    assert s.desired_status == "active"   # намерение записано
+    assert s.status == "inactive"         # API НЕ выставляет факт — это reconciler
+    db.close()
+
+
+def test_stop_stream_sets_desired_inactive(client):
+    sid = _create_stream(client)
+    client.post(f"/api/streams/{sid}/start")
+    r = client.post(f"/api/streams/{sid}/stop")
+    assert r.status_code == 200
+    assert r.json()["desired_status"] == "inactive"
+
+    db = _db_session()
+    assert db.get(Stream, sid).desired_status == "inactive"
+    db.close()
+
+
+def test_start_stop_are_idempotent(client):
+    """Повторный start/stop не должен ломаться: API не знает про живость процесса."""
+    sid = _create_stream(client)
+    assert client.post(f"/api/streams/{sid}/start").status_code == 200
+    assert client.post(f"/api/streams/{sid}/start").status_code == 200
+    assert client.post(f"/api/streams/{sid}/stop").status_code == 200
+    assert client.post(f"/api/streams/{sid}/stop").status_code == 200
+
+
+def test_start_stream_not_found(client):
+    assert client.post("/api/streams/99999/start").status_code == 404
+
+
+def test_list_streams_reports_stored_status(client):
+    """list_streams отдаёт status как факт из БД, а не пересчитывает по Popen.
+
+    Регрессия на старое поведение: раньше список перезаписывал статус по
+    живости subprocess'а в памяти API. Теперь reconciler поставил 'error' —
+    и API обязан показать 'error', даже если у него нет никакого процесса.
+    """
+    sid = _create_stream(client)
+    db = _db_session()
+    s = db.get(Stream, sid)
+    s.status = "error"
+    s.status_reason = "producer падал слишком быстро"
+    db.commit()
+    db.close()
+
+    data = client.get("/api/streams").json()
+    row = next(x for x in data if x["id"] == sid)
+    assert row["status"] == "error"

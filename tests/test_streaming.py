@@ -2,6 +2,13 @@
 import json
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.core.database import Base
+from app.db.models import Stream
+from app.streaming.manager import MAX_FAST_CRASHES, StreamManager
 from app.streaming.yolo_consumer import YOLOConsumer
 
 # ---- Тесты FrameProducer ----
@@ -216,3 +223,145 @@ class TestTopics:
         from app.core.config import settings
         from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS
         assert KAFKA_BOOTSTRAP_SERVERS == settings.kafka_bootstrap_servers
+
+
+# ---- Тесты StreamManager (reconciler) ----
+
+class FakeProcess:
+    """Замена subprocess.Popen для тестов reconciler'а.
+
+    .alive управляет ответом poll(): None = жив, код = мёртв.
+    terminate() помечает убитым. Никаких реальных процессов и сети.
+    """
+    def __init__(self, alive=True):
+        self.alive = alive
+        self.terminated = False
+        self.pid = 4242
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def terminate(self):
+        self.terminated = True
+        self.alive = False
+
+
+class TestStreamManager:
+    """Reconciler: сверяет desired из БД с фактическими процессами."""
+
+    def _fresh(self, desired="active"):
+        """Чистая in-memory БД + один стрим + менеджер с мок-spawn.
+
+        Возвращает (db, Session, stream, spawned) — spawned список фейковых
+        процессов, которые вернула фабрика spawn.
+        """
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        stream = Stream(
+            name="cam", rtsp_url="rtsp://x", fps=5,
+            status="inactive", desired_status=desired,
+        )
+        db.add(stream)
+        db.commit()
+        db.refresh(stream)
+
+        spawned = []
+        def spawn(rtsp, fps, sid, alive=True):
+            p = FakeProcess(alive=alive)
+            spawned.append(p)
+            return p
+
+        manager = StreamManager(spawn=spawn, session_factory=Session)
+        return db, Session, stream, spawned, manager
+
+    def test_spawns_missing_producer(self):
+        """desired=active, процесса нет → reconciler поднимает и ставит status=active."""
+        db, _, stream, spawned, mgr = self._fresh()
+        mgr.reconcile_once(db)
+        assert len(spawned) == 1
+        assert db.get(Stream, stream.id).status == "active"
+        db.close()
+
+    def test_does_not_respawn_live_producer(self):
+        """Идемпотентность: живой нужный процесс не трогаем на следующем витке."""
+        db, _, stream, spawned, mgr = self._fresh()
+        mgr.reconcile_once(db)
+        mgr.reconcile_once(db)
+        assert len(spawned) == 1  # второй виток ничего не породил
+
+    def test_respawns_after_crash(self):
+        """producer умер → на следующем витке поднялся новый."""
+        db, _, stream, spawned, mgr = self._fresh()
+        mgr.reconcile_once(db)
+        assert len(spawned) == 1
+        spawned[0].alive = False          # имитируем падение
+        mgr.reconcile_once(db)
+        assert len(spawned) == 2          # поднят второй
+        assert db.get(Stream, stream.id).status == "active"
+        db.close()
+
+    def test_terminates_when_desired_inactive(self):
+        """desired=inactive → живой процесс убит, status=inactive."""
+        db, _, stream, spawned, mgr = self._fresh()
+        mgr.reconcile_once(db)
+        assert len(spawned) == 1
+        db.get(Stream, stream.id).desired_status = "inactive"
+        db.commit()
+        mgr.reconcile_once(db)
+        assert spawned[0].terminated is True
+        assert db.get(Stream, stream.id).status == "inactive"
+        db.close()
+
+    def test_backoff_marks_error_and_stops(self):
+        """Быстрые смерти подряд → status=error, спавнов больше нет (защита от шторма)."""
+        db, _, stream, spawned, mgr = self._fresh()
+        # spawn возвращает уже мёртвый процесс → uptime ~0 < окна = краш каждый виток
+        def dead_spawn(rtsp, fps, sid):
+            p = FakeProcess(alive=False)
+            spawned.append(p)
+            return p
+        mgr.spawn = dead_spawn
+
+        for _ in range(MAX_FAST_CRASHES + 3):
+            mgr.reconcile_once(db)
+
+        st = db.get(Stream, stream.id)
+        assert st.status == "error"
+        assert st.status_reason            # причина заполнена
+        # породили ровно MAX_FAST_CRASHES процессов и остановились
+        assert len(spawned) == MAX_FAST_CRASHES
+
+    def test_retry_after_stop_start_clears_error(self):
+        """stop→start снимает error и даёт свежую попытку запуска."""
+        db, _, stream, spawned, mgr = self._fresh()
+        def dead_spawn(rtsp, fps, sid):
+            p = FakeProcess(alive=False)
+            spawned.append(p)
+            return p
+        mgr.spawn = dead_spawn
+        for _ in range(MAX_FAST_CRASHES + 1):
+            mgr.reconcile_once(db)
+        assert db.get(Stream, stream.id).status == "error"
+
+        # stop: снимаем с desired → reconciler чистит errored/crashes
+        db.get(Stream, stream.id).desired_status = "inactive"
+        db.commit()
+        mgr.reconcile_once(db)
+
+        # start: снова desired=active, spawn теперь живой → свежая попытка
+        db.get(Stream, stream.id).desired_status = "active"
+        db.commit()
+        def alive_spawn(rtsp, fps, sid):
+            p = FakeProcess(alive=True)
+            spawned.append(p)
+            return p
+        mgr.spawn = alive_spawn
+        mgr.reconcile_once(db)
+        assert db.get(Stream, stream.id).status == "active"
+        db.close()
