@@ -1,9 +1,9 @@
 """Kafka Producer — читает источник (RTSP / файл) и шлёт кадры в топик raw_frames
 
-Запускается как subprocess ИЗНУТРИ api-контейнера
-(app/api/routes/streams.py → POST /{stream_id}/start), поэтому:
-- логи идут в stdout/stderr процесса api и видны в `docker compose logs api`;
-- адрес источника должен открываться С ТОЧКИ ЗРЕНИЯ КОНТЕЙНЕРА:
+Запускается как subprocess сервисом stream_manager
+(app/streaming/manager.py — reconcile loop), поэтому:
+- логи идут в stdout/stderr процесса и видны в `docker compose logs stream-manager`;
+- адрес источника должен открываться С ТОЧКИ ЗРЕНИЯ КОНТЕЙНЕРА stream-manager:
   * встроенный MediaMTX:          rtsp://mediamtx:8554/<path>
   * источник на хосте (Windows):  rtsp://host.docker.internal:<port>/<path>
   * localhost изнутри контейнера — это сам контейнер, а НЕ машина хоста.
@@ -60,7 +60,7 @@ class FrameProducer:
 
         Раньше провал открытия ронял процесс молча (stderr глотался роутом),
         и «стрим не робил» без единой строчки в логах — теперь причина видна
-        в `docker compose logs api`.
+        в `docker compose logs stream-manager`.
         """
         os.environ.setdefault(RTSP_CAPTURE_ENV, RTSP_CAPTURE_OPTS)
         is_rtsp = str(self.source).lower().startswith("rtsp://")
@@ -78,7 +78,7 @@ class FrameProducer:
 
         if is_rtsp:
             hint = (
-                "Адрес должен открываться ИЗ api-контейнера: localhost внутри "
+                "Адрес должен открываться ИЗ контейнера stream-manager: localhost внутри "
                 "контейнера — это сам контейнер. Для встроенного MediaMTX — "
                 "rtsp://mediamtx:8554/<path>, для источника на хосте — "
                 "rtsp://host.docker.internal:<port>/<path>. Убедись, что в источник "
@@ -220,7 +220,7 @@ if __name__ == "__main__":
     import sys
 
     # basicConfig нужен: это отдельный процесс, без него logging по умолчанию
-    # печатает только WARNING+. Логи видны через `docker compose logs api` —
+    # печатает только WARNING+. Логи видны через `docker compose logs stream-manager` —
     # сюда же попадают падения producer'а (раньше они глотались DEVNULL).
     logging.basicConfig(
         level=logging.INFO,

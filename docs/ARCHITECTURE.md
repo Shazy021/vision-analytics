@@ -118,7 +118,7 @@ fought over the same stream.
 
 We now split INTENT from FACT (like Kubernetes controllers):
 - `Stream.desired_status` (active/inactive) — intent, written only by the API;
-- `Stream.status` (active/inactive/error) — fact, written only by `stream_manager`;
+- `Stream.status` (starting/active/inactive/error) — fact, written only by `stream_manager`;
 - `Stream.status_reason` — diagnosis when `status=error`.
 
 `stream_manager` runs a reconcile loop: each pass reads desired from the DB,
@@ -127,11 +127,17 @@ missing producers and killing ones no longer desired. A pass is idempotent
 (live producers are left alone), so an API restart is irrelevant to streams and
 a crashed producer is respawned automatically.
 
-Backoff against a spawn storm: if a producer dies sooner than `CRASH_WINDOW`
-(10s) after start, that counts as a crash; after `MAX_FAST_CRASHES` (3) rapid
-crashes in a row the stream gets `status=error` with a reason and is no longer
-respawned until the user does `stop` → `start` (which removes it from desired
-and clears the state).
+Honest status: spawning sets `starting` (process launched, source not yet
+confirmed); `active` is set only once the producer survives `HEALTHY_THRESHOLD`
+(30s). So an unreachable source never shows green.
+
+Backoff against a spawn storm: a death counts as a crash if the producer exited
+with `EXIT_OPEN_FAILED` (42 — "source couldn't open", regardless of uptime) or
+lived less than `HEALTHY_THRESHOLD`. After `MAX_FAST_CRASHES` (3) crashes in a
+row the stream gets `status=error` with a reason and is no longer respawned
+until the user does `stop` → `start` (which removes it from desired and clears
+the state). The threshold is deliberately larger than the RTSP open time (a few
+seconds), otherwise a broken source dying at ~10s would be respawned forever.
 
 ---
 
@@ -234,7 +240,7 @@ Indexed on `video_id`, `stream_id`, `class_name`, `detected_at`.
 | `name` | varchar(255) | |
 | `rtsp_url` | varchar(512) | |
 | `desired_status` | varchar(20) | **intent** — `active`/`inactive`; written only by the API |
-| `status` | varchar(20) | **fact** — `active`/`inactive`/`error`; written only by `stream_manager` |
+| `status` | varchar(20) | **fact** — `starting`/`active`/`inactive`/`error`; written only by `stream_manager` |
 | `status_reason` | varchar(255) | diagnosis when `status=error` |
 | `fps` | int | capture rate |
 | `created_at` | datetime | server default `now()` |

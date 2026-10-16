@@ -116,7 +116,7 @@ API — только «заказчик»: пишет намерение (`desir
 
 Теперь разделили НАМЕРЕНИЕ и ФАКТ (как контроллеры Kubernetes):
 - `Stream.desired_status` (active/inactive) — намерение, пишет только API;
-- `Stream.status` (active/inactive/error) — факт, пишет только `stream_manager`;
+- `Stream.status` (starting/active/inactive/error) — факт, пишет только `stream_manager`;
 - `Stream.status_reason` — диагноз при `status=error`.
 
 `stream_manager` крутит reconcile loop: каждый виток читает desired из БД,
@@ -124,10 +124,17 @@ API — только «заказчик»: пишет намерение (`desir
 поднимает, лишних убивает. Виток идемпотентен (живых не трогает), поэтому
 рестарт API безразличен стримам, а упавший producer поднимается сам.
 
-Backoff от spawn-шторма: если producer умер раньше `CRASH_WINDOW` (10с) после
-старта, это краш; после `MAX_FAST_CRASHES` (3) быстрых падений подряд стрим
-получает `status=error` с причиной и больше не поднимается, пока пользователь
-не сделает `stop` → `start` (это снимает стрим с desired и очищает состояние).
+Статус честный: при спавне ставится `starting` (процесс запущен, но источник
+ещё не подтверждён), а `active` — только когда producer пережил `HEALTHY_THRESHOLD`
+(30с). Так недоступный источник не светится зелёным.
+
+Backoff от spawn-шторма: смерть считается крашем, если producer завершился с
+кодом `EXIT_OPEN_FAILED` (42 — «источник не открылся», независимо от времени
+жизни) либо прожил меньше `HEALTHY_THRESHOLD`. После `MAX_FAST_CRASHES` (3)
+крашей подряд стрим получает `status=error` с причиной и больше не поднимается,
+пока пользователь не сделает `stop` → `start` (это снимает стрим с desired и
+очищает состояние). Порог заведомо больше времени открытия RTSP (~несколько
+секунд), иначе битый источник, падающий на ~10с, бесконечно переподнимался.
 
 ---
 
@@ -231,7 +238,7 @@ Backoff от spawn-шторма: если producer умер раньше `CRASH_
 | `name` | varchar(255) | |
 | `rtsp_url` | varchar(512) | |
 | `desired_status` | varchar(20) | **намерение** — `active`/`inactive`; пишет только API |
-| `status` | varchar(20) | **факт** — `active`/`inactive`/`error`; пишет только `stream_manager` |
+| `status` | varchar(20) | **факт** — `starting`/`active`/`inactive`/`error`; пишет только `stream_manager` |
 | `status_reason` | varchar(255) | диагноз при `status=error` |
 | `fps` | int | частота захвата |
 | `created_at` | datetime | server default `now()` |

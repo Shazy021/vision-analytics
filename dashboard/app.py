@@ -717,10 +717,10 @@ elif page == "📡 Стримы":
                 st.error(f"❌ {e}")
 
     st.caption(
-        "⚠️ Адрес источника должен открываться **изнутри контейнера api**: для встроенного "
+        "⚠️ Адрес источника должен открываться **изнутри контейнера `stream-manager`**: для встроенного "
         "MediaMTX — `rtsp://mediamtx:8554/<path>`; для источника на Windows-хосте — "
         "`rtsp://host.docker.internal:<port>/<path>`. `localhost` внутри контейнера — это сам контейнер. "
-        "Если стрим не стартует — смотри `docker compose logs api --tail 50`: producer пишет туда причину."
+        "Если стрим не стартует — смотри `docker compose logs stream-manager --tail 50`: producer пишет туда причину."
     )
 
     st.markdown("---")
