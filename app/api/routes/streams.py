@@ -6,7 +6,6 @@
 SessionLocal() в обход Depends(get_db) ломает герметичность тестов.
 """
 import re
-import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -18,9 +17,11 @@ from app.db.models import Detection, Stream
 
 router = APIRouter(prefix="/api/streams", tags=["streams"])
 
-# Хранилище запущенных процессов producer
-# {stream_id: subprocess.Popen}
-_running_processes: dict[int, subprocess.Popen] = {}
+# ВАЖНО (паттерн desired-state + reconciler):
+# Здесь больше НЕТ словаря запущенных Popen. API не порождает и не убивает
+# процессы producer'а — он только пишет НАМЕРЕНИЕ (desired_status) в БД.
+# Реальными процессами владеет отдельный сервис app/streaming/manager.py.
+# Благодаря этому рестарт/масштабирование API не роняет и не дублирует стримы.
 
 
 class StreamCreate(BaseModel):
@@ -46,16 +47,15 @@ def list_streams(db: Session = Depends(get_db)):
         result = []
         for s in streams:
             count = db.query(Detection).filter(Detection.stream_id == s.id).count()
-            # Проверяем реально ли процесс жив
-            actual_status = "active" if s.id in _running_processes and _running_processes[s.id].poll() is None else "inactive"
-            if actual_status != s.status:
-                s.status = actual_status
-                db.commit()
+            # status — это ФАКТ, который пишет stream_manager (reconciler).
+            # API его только отдаёт наружу, сам не пересчитывает и не пишет:
+            # раньше здесь был тест на живость Popen из памяти API — он и
+            # создавал иллюзию, что статус «принадлежит» API-контейнеру.
             result.append(StreamResponse(
                 id=s.id,
                 name=s.name,
                 rtsp_url=s.rtsp_url,
-                status=actual_status,
+                status=s.status,
                 fps=s.fps,
                 detections_count=count,
             ))
@@ -94,10 +94,9 @@ def delete_stream(stream_id: int, db: Session = Depends(get_db)):
         stream = db.query(Stream).filter(Stream.id == stream_id).first()
         if not stream:
             raise HTTPException(status_code=404, detail="Stream not found")
-        # Останавливаем если запущен
-        if stream_id in _running_processes:
-            _running_processes[stream_id].terminate()
-            del _running_processes[stream_id]
+        # Процесс здесь НЕ трогаем: как только строка Stream исчезнет из БД,
+        # стрим перестанет входить в desired-множество reconciler'а, и тот на
+        # ближайшем витке сам убьёт его producer'а (см. app/streaming/manager.py).
         # Удаляем кадры стрима из S3
         storage.delete_prefix(f"streams/{stream_id}/")
 
@@ -110,56 +109,48 @@ def delete_stream(stream_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{stream_id}/start")
 def start_stream(stream_id: int, db: Session = Depends(get_db)):
-    """Запустить обработку стрима"""
+    """Запросить запуск стрима (пишет только НАМЕРЕНИЕ).
+
+    Ничего не спавнит. Ставит desired_status='active' — «хочу, чтобы этот
+    стрим работал». Кто реально поднимет producer'а и проследит, чтобы он
+    оставался живым, — stream_manager (reconciler). Идемпотентно: повторный
+    start ничего плохого не делает (просто ещё раз пишет 'active').
+    """
     try:
         stream = db.query(Stream).filter(Stream.id == stream_id).first()
         if not stream:
             raise HTTPException(status_code=404, detail="Stream not found")
 
-        if stream_id in _running_processes and _running_processes[stream_id].poll() is None:
-            raise HTTPException(status_code=400, detail="Stream already running")
-
-        # Запускаем producer как subprocess.
-        # stdout/stderr НЕ глотаем (никаких DEVNULL): producer пишет диагностику
-        # (ретраи открытия RTSP, прогресс, трейсбеки) прямо в лог api-контейнера.
-        # Раньше DEVNULL превращал любое падение producer'а в «тихую смерть»
-        # при 200 OK — и стримы не работали без единой подсказки в логах.
-        process = subprocess.Popen(
-            [
-                "python", "-m", "app.streaming.producer",
-                stream.rtsp_url,
-                str(stream.fps),
-                str(stream.id),
-            ],
-        )
-        _running_processes[stream_id] = process
-
-        stream.status = "active"
+        stream.desired_status = "active"
         db.commit()
 
-        return {"status": "active", "stream_id": stream_id, "pid": process.pid}
+        return {
+            "desired_status": "active",
+            "stream_id": stream_id,
+            "note": "reconciler will spawn the producer on its next pass",
+        }
     finally:
         db.close()
 
 
 @router.post("/{stream_id}/stop")
 def stop_stream(stream_id: int, db: Session = Depends(get_db)):
-    """Остановить обработку стрима"""
+    """Запросить остановку стрима (пишет только НАМЕРЕНИЕ).
+
+    desired_status='inactive' — «хочу, чтобы этот стрим НЕ работал».
+    reconciler на ближайшем витке увидит расхождение (процесс жив, а desired
+    inactive) и завершит producer'а. Идемпотентно: stop остановленного стрима
+    — тоже 200 (API не знает и не должен знать, жив ли процесс).
+    """
     try:
         stream = db.query(Stream).filter(Stream.id == stream_id).first()
         if not stream:
             raise HTTPException(status_code=404, detail="Stream not found")
 
-        if stream_id not in _running_processes:
-            raise HTTPException(status_code=400, detail="Stream not running")
-
-        _running_processes[stream_id].terminate()
-        del _running_processes[stream_id]
-
-        stream.status = "inactive"
+        stream.desired_status = "inactive"
         db.commit()
 
-        return {"status": "inactive", "stream_id": stream_id}
+        return {"desired_status": "inactive", "stream_id": stream_id}
     finally:
         db.close()
 
