@@ -31,6 +31,13 @@ RTSP_CAPTURE_OPTS = "rtsp_transport;tcp"
 OPEN_ATTEMPTS = 3      # сколько раз пробуем открыть источник
 OPEN_RETRY_DELAY = 3   # пауза между попытками, сек
 
+# Код выхода при «источник вообще не открылся» (битый/недоступный RTSP).
+# Отдельный от общей ошибки (1), чтобы stream_manager отличал «источник
+# недоступен» от «упал в рантайме» и гарантированно засчитывал это как краш,
+# НЕ завися от того, сколько секунд заняли попытки открытия. Синхронизировано
+# с EXIT_OPEN_FAILED в app/streaming/manager.py.
+EXIT_OPEN_FAILED = 42
+
 
 class FrameProducer:
     """Читает видео/RTSP поток и отправляет кадры в Kafka"""
@@ -228,6 +235,12 @@ if __name__ == "__main__":
     producer = FrameProducer(source, fps=fps, stream_id=stream_id)
     try:
         producer.run()
+    except ConnectionError:
+        # Источник не открылся вообще — это не «рантайм-сбой», а битый/недоступный
+        # адрес. Отдельный код выхода: reconciler по нему помечает стрим error,
+        # даже если попытки открытия длились дольше порога здоровья.
+        logger.exception("Источник не открылся (source=%r, stream_id=%s)", source, stream_id)
+        raise SystemExit(EXIT_OPEN_FAILED)
     except Exception:
         logger.exception("Producer упал (source=%r, stream_id=%s)", source, stream_id)
         raise SystemExit(1)

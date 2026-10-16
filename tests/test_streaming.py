@@ -230,16 +230,17 @@ class TestTopics:
 class FakeProcess:
     """Замена subprocess.Popen для тестов reconciler'а.
 
-    .alive управляет ответом poll(): None = жив, код = мёртв.
+    .alive управляет ответом poll(): None = жив, код = мёртв (возвращается .code).
     terminate() помечает убитым. Никаких реальных процессов и сети.
     """
-    def __init__(self, alive=True):
+    def __init__(self, alive=True, code=0):
         self.alive = alive
+        self.code = code
         self.terminated = False
         self.pid = 4242
 
     def poll(self):
-        return None if self.alive else 0
+        return None if self.alive else self.code
 
     def terminate(self):
         self.terminated = True
@@ -281,10 +282,25 @@ class TestStreamManager:
         return db, Session, stream, spawned, manager
 
     def test_spawns_missing_producer(self):
-        """desired=active, процесса нет → reconciler поднимает и ставит status=active."""
+        """desired=active, процесса нет → reconciler поднимает, status=starting."""
         db, _, stream, spawned, mgr = self._fresh()
         mgr.reconcile_once(db)
         assert len(spawned) == 1
+        # starting, а не active: процесс запущен, но ещё не подтверждён живым
+        assert db.get(Stream, stream.id).status == "starting"
+        db.close()
+
+    def test_confirms_active_after_healthy(self):
+        """Пережив порог здоровья, живой producer получает status=active."""
+        import time as _time
+
+        from app.streaming.manager import HEALTHY_THRESHOLD
+        db, _, stream, spawned, mgr = self._fresh()
+        mgr.reconcile_once(db)
+        assert db.get(Stream, stream.id).status == "starting"
+        # перематываем время старта в прошлое — «producer живёт давно»
+        mgr._children[stream.id].started_at = _time.monotonic() - (HEALTHY_THRESHOLD + 1)
+        mgr.reconcile_once(db)
         assert db.get(Stream, stream.id).status == "active"
         db.close()
 
@@ -296,14 +312,14 @@ class TestStreamManager:
         assert len(spawned) == 1  # второй виток ничего не породил
 
     def test_respawns_after_crash(self):
-        """producer умер → на следующем витке поднялся новый."""
+        """producer умер → на следующем витке поднялся новый (status=starting)."""
         db, _, stream, spawned, mgr = self._fresh()
         mgr.reconcile_once(db)
         assert len(spawned) == 1
         spawned[0].alive = False          # имитируем падение
         mgr.reconcile_once(db)
         assert len(spawned) == 2          # поднят второй
-        assert db.get(Stream, stream.id).status == "active"
+        assert db.get(Stream, stream.id).status == "starting"
         db.close()
 
     def test_terminates_when_desired_inactive(self):
@@ -363,5 +379,37 @@ class TestStreamManager:
             return p
         mgr.spawn = alive_spawn
         mgr.reconcile_once(db)
-        assert db.get(Stream, stream.id).status == "active"
+        # свежий запуск → starting (active подтвердится только пережив порог здоровья)
+        assert db.get(Stream, stream.id).status == "starting"
+        db.close()
+
+    def test_open_failure_exit_code_backs_off(self):
+        """Код выхода EXIT_OPEN_FAILED = краш даже при «длинной» жизни.
+
+        Это чинит исходный баг: producer с недоступным RTSP живёт ~9-10с
+        (3 попытки открытия), что раньше попадало в ветку «прожил достаточно» и
+        обнуляло счётчик → бесконечный респавн. Теперь код 42 однозначно краш.
+        """
+        import time as _time
+
+        from app.streaming.manager import EXIT_OPEN_FAILED, HEALTHY_THRESHOLD
+        db, _, stream, spawned, mgr = self._fresh()
+
+        def open_fail_spawn(rtsp, fps, sid):
+            p = FakeProcess(alive=False, code=EXIT_OPEN_FAILED)
+            spawned.append(p)
+            return p
+        mgr.spawn = open_fail_spawn
+
+        for _ in range(MAX_FAST_CRASHES + 2):
+            # перематываем время: даже «прожив» дольше порога, смерть с кодом 42
+            # обязана считаться крашем
+            if stream.id in mgr._children:
+                mgr._children[stream.id].started_at = _time.monotonic() - (HEALTHY_THRESHOLD + 5)
+            mgr.reconcile_once(db)
+
+        st = db.get(Stream, stream.id)
+        assert st.status == "error"
+        assert "не открывается" in (st.status_reason or "")
+        assert len(spawned) == MAX_FAST_CRASHES
         db.close()

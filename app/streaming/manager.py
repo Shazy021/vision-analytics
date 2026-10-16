@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.db.models import Stream
+from app.streaming.producer import EXIT_OPEN_FAILED
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +38,17 @@ logger = logging.getLogger(__name__)
 # Как часто сверять desired и fact. Меньше — быстрее подхватываем падения,
 # больше — чаще дёргаем БД. 2с: компромисс для учебного проекта.
 RECONCILE_INTERVAL = 2.0
-# producer, проживший меньше этого времени, считается «упавшим сразу».
-# Порог заведомо больше времени старта (импорт torch/cv2, коннект к Kafka),
-# но меньше «нормальной» жизни рабочего стрима.
-CRASH_WINDOW = 10.0
-# Сколько быстрых падений подряд терпим, прежде чем сдаться и пометить error.
-# 3 даёт один шанс на транзиентную проблему, но отсекает spawn-шторм на
-# заведомо битом источнике (падение каждые <10с → шторм процессоров/CPU).
+# Сколько producer должен прожить, чтобы считать его ЗДОРОВЫМ. Только ребёнок,
+# переживший этот порог, сбрасывает счётчик крашей и получает status=active.
+# Заведомо больше времени старта + открытия источника (несколько секунд, а при
+# недоступном хосте — до десятка секунд), но меньше «нормальной» жизни стрима.
+# Раньше это называлось CRASH_WINDOW=10с и было выставлено впритык ко времени
+# открытия RTSP (~9с) — из-за чего битый источник, падающий на ~10с, попадал в
+# ветку «прожил достаточно», счётчик обнулялся, и респавн не кончался никогда.
+HEALTHY_THRESHOLD = 30.0
+# Сколько падений подряд (до порога здоровья либо с кодом «источник не открылся»)
+# терпим, прежде чем сдаться и пометить error. 3 отсекает spawn-шторм на заведомо
+# битом источнике, но даёт шанс транзиентной проблеме.
 MAX_FAST_CRASHES = 3
 
 
@@ -69,7 +74,8 @@ class ChildRecord:
     """Процесс producer'а, за которым следит manager, плюс время его старта.
 
     started_at нужен для backoff: чтобы понять, умер ли процесс «сразу»
-    (краш) или отжил своё (штатное завершение), сравниваем uptime с CRASH_WINDOW.
+    (краш) или отжил своё (штатное завершение), сравниваем uptime с
+    HEALTHY_THRESHOLD.
     """
     stream_id: int
     process: subprocess.Popen
@@ -136,7 +142,11 @@ class StreamManager:
             "stream %s: producer поднят (pid=%s)",
             stream.id, getattr(process, "pid", "?"),
         )
-        self._set_status(db, stream.id, "active", None)
+        # starting, а НЕ active: мы лишь запустили процесс, но ещё не знают,
+        # открылся ли источник и потекли ли кадры. active поставит
+        # _confirm_healthy, когда ребёнок переживёт порог здоровья. Так дашборд
+        # не врёт зелёным на битом/недоступном источнике.
+        self._set_status(db, stream.id, "starting", None)
 
     def _stop_child(self, stream_id: int) -> None:
         """Завершить дочерний процесс (если он есть) и забыть его."""
@@ -153,11 +163,37 @@ class StreamManager:
             # Процесс мог уже умереть между poll() и terminate() — это не беда.
             logger.exception("stream %s: terminate() бросил (возможно, уже мёртв)", stream_id)
 
-    def _on_child_died(self, db: Session, stream: Stream, child: ChildRecord) -> bool:
+    def _confirm_healthy(self, db: Session, stream: Stream, child: ChildRecord) -> None:
+        """Живой ребёнок пережил порог здоровья → подтверждаем status=active.
+
+        Только здесь стрим получает 'active' — то есть «producer реально живёт,
+        а не только что стартовал». Заодно сбрасываем счётчик крашей: длинная
+        жизнь — доказательство, что источник рабочий.
+        """
+        if (
+            time.monotonic() - child.started_at >= HEALTHY_THRESHOLD
+            and stream.status != "active"
+        ):
+            self._crashes[stream.id] = 0
+            self._set_status(db, stream.id, "active", None)
+            logger.info(
+                "stream %s: producer жив >= %.0fс → active",
+                stream.id, HEALTHY_THRESHOLD,
+            )
+
+    def _on_child_died(self, db: Session, stream: Stream, child: ChildRecord, code) -> bool:
         """Обработать обнаруженную смерть ребёнка.
 
         Возвращает True, если мы СДАЛИСЬ (пометили error) и поднимать нельзя,
         и False, если можно переподнимать.
+
+        Считаем смертью-крашем два случая:
+          - код выхода EXIT_OPEN_FAILED — источник вообще не открылся (битый/
+            недоступный RTSP). Это краш НЕЗАВИСИМО от uptime: попытки открытия
+            могут длиться дольше порога здоровья, и по одному таймеру мы бы их
+            проморгали (именно так и рождался бесконечный респавн).
+          - uptime < HEALTHY_THRESHOLD — умер раньше, чем успел зарекомендовать
+            себя рабочим.
         """
         sid = stream.id
         uptime = time.monotonic() - child.started_at
@@ -165,14 +201,16 @@ class StreamManager:
         # чтобы следующий виток не считал его живым и мог пересоздать.
         self._children.pop(sid, None)
 
-        if uptime >= CRASH_WINDOW:
-            # Прожил «достаточно» — это штатное завершение (например, камера
-            # отвалилась через час), а не spawn-шторм. Обнуляем счётчик и
-            # переподнимаем.
+        open_failed = (code == EXIT_OPEN_FAILED)
+        crashed = open_failed or uptime < HEALTHY_THRESHOLD
+
+        if not crashed:
+            # Прожил «достаточно» и не «источник не открылся» — штатное завершение
+            # (например, камера отвалилась через час). Обнуляем счётчик и переподнимаем.
             self._crashes[sid] = 0
             logger.info(
-                "stream %s: producer отжил %.0fс (>= окна %.0fс) — переподнимаю",
-                sid, uptime, CRASH_WINDOW,
+                "stream %s: producer отжил %.0fс (>= порога %.0fс) — переподнимаю",
+                sid, uptime, HEALTHY_THRESHOLD,
             )
             return False
 
@@ -180,19 +218,27 @@ class StreamManager:
         n = self._crashes[sid]
 
         if n >= MAX_FAST_CRASHES:
-            reason = (
-                f"producer падал {n} раз(а) менее чем за {CRASH_WINDOW:.0f}с после "
-                f"старта — слишком частые рестарты (проверь RTSP URL/источник). "
-                f"Дальнейшие попытки остановлены; нажми стоп, затем старт, чтобы повторить."
-            )
+            if open_failed:
+                reason = (
+                    f"источник не открывается: producer завершился с кодом "
+                    f"{EXIT_OPEN_FAILED} {n} раз(а) подряд. Проверь RTSP URL и его "
+                    f"доступность ИЗ контейнера stream-manager (localhost там ≠ хост). "
+                    f"Попытки остановлены; нажми стоп, затем старт."
+                )
+            else:
+                reason = (
+                    f"producer падал {n} раз(а) менее чем за {HEALTHY_THRESHOLD:.0f}с "
+                    f"после старта — слишком частые рестарты (проверь источник). "
+                    f"Попытки остановлены; нажми стоп, затем старт, чтобы повторить."
+                )
             logger.error("stream %s: %s", sid, reason)
             self._errored.add(sid)
             self._set_status(db, sid, "error", reason)
             return True
 
         logger.warning(
-            "stream %s: producer умер через %.0fс (< окна %.0fс) — рестарт %d/%d",
-            sid, uptime, CRASH_WINDOW, n, MAX_FAST_CRASHES,
+            "stream %s: producer умер (код=%s, uptime=%.0fс) — рестарт %d/%d",
+            sid, code, uptime, n, MAX_FAST_CRASHES,
         )
         return False
 
@@ -227,11 +273,14 @@ class StreamManager:
                 continue  # сдались — ждём явного stop->start
             stream = by_id[sid]
             child = self._children.get(sid)
-            if child is not None and child.process.poll() is None:
-                continue  # жив — ничего не делаем (идемпотентность)
             if child is not None:
-                # был и умер — решить, поднимать ли снова
-                if self._on_child_died(db, stream, child):
+                code = child.process.poll()
+                if code is None:
+                    # жив: подтвердить active, если пережил порог здоровья
+                    self._confirm_healthy(db, stream, child)
+                    continue
+                # был и умер — решить, поднимать ли снова (код выхода важен)
+                if self._on_child_died(db, stream, child, code):
                     continue  # пометили error — не поднимаем
             self._spawn(db, stream)
 
@@ -240,8 +289,8 @@ class StreamManager:
     def run_forever(self) -> None:
         """Бесконечный reconcile loop. Ошибки одного витка не роняют сервис."""
         logger.info(
-            "stream_manager запущен (interval=%.1fs, crash_window=%.0fs, max_fast_crashes=%d)",
-            self.poll_interval, CRASH_WINDOW, MAX_FAST_CRASHES,
+            "stream_manager запущен (interval=%.1fs, healthy_threshold=%.0fs, max_fast_crashes=%d)",
+            self.poll_interval, HEALTHY_THRESHOLD, MAX_FAST_CRASHES,
         )
         while True:
             try:
