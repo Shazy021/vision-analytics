@@ -193,6 +193,59 @@ All support `source=video|stream` filter and `video_id` / `stream_id` filters.
 
 ---
 
+## Data Model
+
+Three PostgreSQL tables (`app/db/models.py`), versioned with Alembic.
+
+### `videos`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | int PK | |
+| `filename` | varchar(255) | |
+| `filepath` | varchar(512) | local path (optional) |
+| `object_key` | varchar(512) | MinIO key, e.g. `videos/5.mp4` |
+| `duration` | float | seconds |
+| `fps` | int | |
+| `resolution` | varchar(20) | e.g. `1920x1080` |
+| `uploaded_at` | datetime | server default `now()` |
+| `status` | varchar(20) | `processing` → `completed` / `partial` / `failed` |
+| `task_id` | varchar(255) | Celery task id |
+
+### `detections`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | int PK | |
+| `video_id` | int FK → `videos.id` | NULL for stream detections |
+| `stream_id` | int FK → `streams.id` | NULL for video detections |
+| `frame_index` | int | frame key in MinIO |
+| `class_name` | varchar(50) | |
+| `confidence` | float | |
+| `bbox_x1/y1/x2/y2` | float | bounding box |
+| `timestamp` | float | seconds within the video file |
+| `detected_at` | datetime | wall-clock; valid for videos AND streams |
+
+A detection belongs to EITHER a video OR a stream — the other FK is NULL.
+Indexed on `video_id`, `stream_id`, `class_name`, `detected_at`.
+
+### `streams`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | int PK | |
+| `name` | varchar(255) | |
+| `rtsp_url` | varchar(512) | |
+| `desired_status` | varchar(20) | **intent** — `active`/`inactive`; written only by the API |
+| `status` | varchar(20) | **fact** — `active`/`inactive`/`error`; written only by `stream_manager` |
+| `status_reason` | varchar(255) | diagnosis when `status=error` |
+| `fps` | int | capture rate |
+| `created_at` | datetime | server default `now()` |
+| `pid` | int | legacy — last producer pid; no longer maintained (see § Stream supervision) |
+
+The `desired_status` (intent) vs `status` (fact) split is the core of the
+desired-state + reconciler pattern: the API owns intent, `stream_manager` owns
+the observed fact. Both live in the DB, so they survive an API or manager restart.
+
+---
+
 ## Project Structure
 
 ```

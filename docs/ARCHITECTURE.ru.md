@@ -190,6 +190,59 @@ Backoff от spawn-шторма: если producer умер раньше `CRASH_
 
 ---
 
+## Модель данных
+
+Три таблицы PostgreSQL (`app/db/models.py`), версии накатываются Alembic.
+
+### `videos`
+| Колонка | Тип | Примечание |
+|---------|-----|-----------|
+| `id` | int PK | |
+| `filename` | varchar(255) | |
+| `filepath` | varchar(512) | локальный путь (опц.) |
+| `object_key` | varchar(512) | ключ в MinIO, напр. `videos/5.mp4` |
+| `duration` | float | секунды |
+| `fps` | int | |
+| `resolution` | varchar(20) | напр. `1920x1080` |
+| `uploaded_at` | datetime | server default `now()` |
+| `status` | varchar(20) | `processing` → `completed` / `partial` / `failed` |
+| `task_id` | varchar(255) | id Celery-задачи |
+
+### `detections`
+| Колонка | Тип | Примечание |
+|---------|-----|-----------|
+| `id` | int PK | |
+| `video_id` | int FK → `videos.id` | NULL для детекций стрима |
+| `stream_id` | int FK → `streams.id` | NULL для детекций видео |
+| `frame_index` | int | ключ кадра в MinIO |
+| `class_name` | varchar(50) | |
+| `confidence` | float | |
+| `bbox_x1/y1/x2/y2` | float | ограничивающий бокс |
+| `timestamp` | float | секунда внутри видеофайла |
+| `detected_at` | datetime | реальное время; валидно и для видео, и для стримов |
+
+Детекция относится ИЛИ к видео, ИЛИ к стриму — второй FK равен NULL.
+Индексы: `video_id`, `stream_id`, `class_name`, `detected_at`.
+
+### `streams`
+| Колонка | Тип | Примечание |
+|---------|-----|-----------|
+| `id` | int PK | |
+| `name` | varchar(255) | |
+| `rtsp_url` | varchar(512) | |
+| `desired_status` | varchar(20) | **намерение** — `active`/`inactive`; пишет только API |
+| `status` | varchar(20) | **факт** — `active`/`inactive`/`error`; пишет только `stream_manager` |
+| `status_reason` | varchar(255) | диагноз при `status=error` |
+| `fps` | int | частота захвата |
+| `created_at` | datetime | server default `now()` |
+| `pid` | int | легаси — pid producer'а; больше не поддерживается (см. § Stream supervision) |
+
+Разделение `desired_status` (намерение) vs `status` (факт) — ядро паттерна
+desired-state + reconciler: намерением владеет API, наблюдаемым фактом —
+`stream_manager`. Оба поля лежат в БД, поэтому переживают рестарт и API, и менеджера.
+
+---
+
 ## Структура проекта
 
 ```
