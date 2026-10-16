@@ -263,6 +263,36 @@ services:
         condition: service_healthy
 
   # ============================================================
+  # Stream Manager — единственный владелец процессов producer'а
+  #
+  # Реализует паттерн desired-state + reconciler: API пишет в БД только
+  # намерение (desired_status), а этот сервис крутит reconcile loop —
+  # поднимает недостающих producer'ов и убивает лишних. Благодаря этому
+  # рестарт api НЕ убивает стримы (процессы живут здесь, а не в api).
+  #
+  # Нужны DATABASE_URL (читать desired / писать status) и Kafka: порождённые
+  # producer'ы-дети наследуют окружение отсюда, поэтому KAFKA_BOOTSTRAP_SERVERS
+  # обязан быть задан именно в этом сервисе. S3 не нужен — producer кадры
+  # в Kafka кладёт, а в MinIO пишет yolo-consumer.
+  # ============================================================
+  stream-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: vap-cpu:latest
+    command: python -m app.streaming.manager
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+
+  # ============================================================
   # MediaMTX — RTSP сервер для симуляции камеры
   # ============================================================
   mediamtx:
