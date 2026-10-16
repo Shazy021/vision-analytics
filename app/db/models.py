@@ -92,7 +92,27 @@ class Stream(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), nullable=False)           # "Парковка камера 1"
     rtsp_url = Column(String(512), nullable=False)       # rtsp://...
-    status = Column(String(20), nullable=False, default="inactive")  # active/inactive
+
+    # ДВА разных статуса — это ядро паттерна desired-state + reconciler.
+    #
+    # desired_status = НАМЕРЕНИЕ («что пользователь хочет»). Пишет только API
+    # (start/stop). Это «заказ», а не факт: стрим мог быть заказан, но producer
+    # ещё не поднят, упал или упирается в backoff.
+    #
+    # status = ФАКТ («что есть на самом деле»). Пишет только stream_manager
+    # (reconciler): active / inactive / error. API этот флаг НЕ выставляет —
+    # он лишь читает и отдаёт наружу.
+    #
+    # Раньше оба смысла были слиты в одном status, и выставлял его API через
+    # живость своего Popen. Из-за этого статус жил в памяти API-контейнера и
+    # умирал вместе с ним. Теперь намерение и факт переживают рестарт API,
+    # потому что оба лежат в БД, а факт обновляет независимый сервис.
+    desired_status = Column(String(20), nullable=False, default="inactive")  # active/inactive
+    status = Column(String(20), nullable=False, default="inactive")          # active/inactive/error
+    # Причина перехода status в "error" (например, «producer умер через 3с,
+    # превышен лимит рестартов»). Пусто, когда статуса ошибки нет.
+    status_reason = Column(String(255), nullable=True)
+
     fps = Column(Integer, nullable=True, default=5)      # частота захвата
     created_at = Column(DateTime, server_default=func.now())
     pid = Column(Integer, nullable=True)
