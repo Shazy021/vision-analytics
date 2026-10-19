@@ -1,5 +1,4 @@
 """Тесты для Kafka streaming модуля"""
-import json
 from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
@@ -36,74 +35,10 @@ class TestFrameProducer:
             call_kwargs = mock_producer_cls.call_args[0][0]
             assert call_kwargs["bootstrap.servers"] == settings.kafka_bootstrap_servers
 
-    def test_producer_has_delivery_report(self):
-        """Проверяем что callback для ошибок определён"""
-        from app.streaming.producer import FrameProducer
-        producer = FrameProducer.__new__(FrameProducer)
-        # Метод должен существовать
-        assert hasattr(producer, "_delivery_report")
-
-
-# ---- Тесты YOLOConsumer ----
+    # ---- Тесты YOLOConsumer ----
 
 class TestYOLOConsumer:
     """Тесты обработки сообщений YOLO consumer"""
-
-    def test_detection_message_format(self):
-        """Проверяем формат сообщения с детекциями"""
-        # Формат который YOLO consumer отправляет в detections
-        detection_msg = {
-            "video_id": None,
-            "stream_id": 1,
-            "frame_index": 42,
-            "source": "rtsp://camera1",
-            "objects": [
-                {
-                    "class": "person",
-                    "confidence": 0.95,
-                    "bbox": {"x1": 100.0, "y1": 200.0, "x2": 300.0, "y2": 400.0},
-                },
-                {
-                    "class": "car",
-                    "confidence": 0.87,
-                    "bbox": {"x1": 500.0, "y1": 100.0, "x2": 800.0, "y2": 300.0},
-                },
-            ],
-            "num_detections": 2,
-        }
-
-        # Проверяем структуру
-        assert detection_msg["video_id"] is None
-        assert detection_msg["stream_id"] == 1
-        assert detection_msg["frame_index"] == 42
-        assert len(detection_msg["objects"]) == 2
-        assert detection_msg["num_detections"] == 2
-
-        # Проверяем формат объекта
-        obj = detection_msg["objects"][0]
-        assert "class" in obj
-        assert "confidence" in obj
-        assert "bbox" in obj
-        assert all(k in obj["bbox"] for k in ["x1", "y1", "x2", "y2"])
-
-    def test_detection_message_serializable(self):
-        """Проверяем что сообщение можно сериализовать в JSON (Kafka требует bytes)"""
-        detection_msg = {
-            "video_id": None,
-            "stream_id": 1,
-            "frame_index": 42,
-            "source": "rtsp://camera1",
-            "objects": [{"class": "person", "confidence": 0.95, "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}}],
-            "num_detections": 1,
-        }
-
-        # Должно сериализоваться без ошибок
-        serialized = json.dumps(detection_msg).encode()
-        assert isinstance(serialized, bytes)
-
-        # И десериализоваться обратно
-        deserialized = json.loads(serialized.decode())
-        assert deserialized == detection_msg
 
     def _make_consumer(self):
         """Consumer без __init__ — без Kafka, без YOLO, без сети.

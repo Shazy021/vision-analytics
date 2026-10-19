@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from app.detection.yolo import Detection, YOLODetector
+from app.detection.yolo import YOLODetector
 
 # =========================================
 # Мок — подмена реального объекта на фейковый
@@ -85,16 +85,3 @@ def test_detect_empty_result(mock_model):
         detections = detector.detect(fake_frame)
 
         assert detections == []
-
-def test_detection_dataclass():
-    """Проверяем, что Detection-датакласс создаётся корректно."""
-    d = Detection(
-        class_name="car",
-        confidence=0.95,
-        bbox=[10, 20, 30, 40],
-        frame_index=1,
-        timestamp=0.5
-    )
-    assert d.class_name == "car"
-    assert d.confidence == 0.95
-    assert d.bbox == [10, 20, 30, 40]

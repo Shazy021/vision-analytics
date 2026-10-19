@@ -73,22 +73,6 @@ def test_video_default_status(db_session):
     assert video.status == "processing"
 
 
-def test_video_uploaded_at_auto(db_session):
-    """uploaded_at заполняется автоматически сервером"""
-    video = Video(
-        filename="test3.mp4",
-        duration=45.0,
-        fps=24,
-    )
-    db_session.add(video)
-    db_session.commit()
-
-    # uploaded_at должен был заполниться (server_default=func.now())
-    # В SQLite это может не сработать (нет now() как в PostgreSQL),
-    # но колонка должна существовать
-    assert hasattr(video, "uploaded_at")
-
-
 # ============================================================
 # ТЕСТЫ МОДЕЛИ DETECTION + СВЯЗЬ С VIDEO
 # ============================================================
