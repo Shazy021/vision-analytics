@@ -28,7 +28,6 @@ def test_video(tmp_path_factory):
     writer.release()
     return video_path
 
-@pytest.mark.asyncio
 async def test_frame_generator_returns_frames(test_video):
     """ Проверяем что генератор выдаёт кадры """
     frames = []
@@ -44,7 +43,6 @@ async def test_frame_generator_returns_frames(test_video):
     assert frames[0].timestamp >= 0
 
 
-@pytest.mark.asyncio
 async def test_frame_generator_fps_reduces_count(test_video):
     """Меньше фпс -> меньше кадров"""
     frames_5fps = []

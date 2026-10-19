@@ -5,51 +5,15 @@ TestClient — это "фейковый клиент" который делае�
 без реального запуска сервера. Не нужен uvicorn, не нужен браузер.
 """
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
-from app.core.database import Base, get_db
+from app.core.database import get_db
 from app.db.models import Detection, Stream, Video
 from app.main import app
 
 
 # ============================================================
-# ФИКСТУРА: in-memory БД + TestClient
+# ФИКСТУРЫ: предзаполненные данные (client — общий, из conftest.py)
 # ============================================================
-@pytest.fixture
-def client():
-    """
-    Создаём TestClient с подменённой БД.
-
-    StaticPool — ВСЕ соединения используют ОДНУ и ту же связь с БД.
-    Без него SQLite :memory: для каждого соединения создаёт
-    новую пустую базу, и create_all() не помогает.
-    """
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,  # ← ключевое отличие!
-    )
-    Base.metadata.create_all(bind=engine)
-
-    def test_get_db():
-        db = Session(bind=engine)
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = test_get_db
-
-    with TestClient(app) as c:
-        yield c
-
-    app.dependency_overrides.clear()
-    Base.metadata.drop_all(bind=engine)
-
-
 @pytest.fixture
 def client_with_data(client):
     """
