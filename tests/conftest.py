@@ -57,7 +57,7 @@ def client():
 
     app.dependency_overrides[get_db] = test_get_db
 
-    with TestClient(app) as c:
+    with patch("app.main.init_db"), TestClient(app) as c:
         yield c
 
     app.dependency_overrides.clear()
