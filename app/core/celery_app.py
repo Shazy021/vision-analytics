@@ -1,11 +1,8 @@
 """
 Celery-приложение — диспетчер фоновых задач.
 
-Celery = Worker + Broker + Backend
-
-- Broker (Redis) — очередь сообщений: "обработай видео #5"
-- Backend (Redis) — хранилище результатов: "видео #5 обработано, 108 детекций"
-- Worker — процесс, который берёт задачи из очереди и выполняет
+Broker (Redis) хранит очередь задач, backend (Redis) — результаты,
+воркеры берут задачи из очереди и выполняют.
 """
 from celery import Celery
 
@@ -19,10 +16,10 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
-    task_serializer = "json",
-    accept_content = ["json"],
-    result_serializer = "json",
-    timezone = "UTC",
+    task_serializer="json",
+    accept_content=["json"],
+    result_serializer="json",
+    timezone="UTC",
     enable_utc=True,
     broker_connection_retry_on_startup=True,
 )

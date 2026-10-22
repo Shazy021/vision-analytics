@@ -1,56 +1,37 @@
 """
 Pydantic-схемы для Video — определяют формат ответов API.
 
-Зачем отдельные схемы, а не просто возвращать SQLAlchemy-модель?
-1. Контроль: возвращаем только нужные поля, не всё из БД
-2. Безопасность: не утекают внутренние данные
-3. Документация: FastAPI генерирует Swagger по этим схемам
-4. Вычисляемые поля: например, detections_count — в БД нет, но API возвращает
+Зачем отдельные схемы, а не SQLAlchemy-модель: контроль, какие поля
+утекают наружу, и Swagger-документация генерируется по ним.
 """
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
 
-# ============================================================
-# БАЗОВАЯ СХЕМА — общие поля для создания и чтения
-# ============================================================
 class VideoBase(BaseModel):
-    """Поля, общие для создания и чтения видео"""
+    """Поля, общие для создания и чтения видео."""
     filename: str
     filepath: str | None = None
-    object_key: str | None = None # ключ в MinIO (например, "videos/5.mp4")
+    object_key: str | None = None  # ключ в MinIO, напр. "videos/5.mp4"
     duration: float | None = None
     fps: int | None = None
     resolution: str | None = None
 
-# ============================================================
-# СХЕМА СОЗДАНИЯ — что присылает клиент при загрузке видео
-# ============================================================
+
 class VideoCreate(VideoBase):
-    """Запрос на создание видео — только filename обязателен"""
-    pass  # наследует всё от VideoBase
+    """Запрос на создание видео — только filename обязателен."""
+    pass
 
-# ============================================================
-# СХЕМА ЧТЕНИЯ — что получает клиент в ответ
-# ============================================================
+
 class VideoRead(VideoBase):
-    """
-    Ответ API с информацией о видео.
-
-    Отличается от VideoBase:
-    - id: генерируется БД, клиент не присылает
-    - status: заполняется сервером (default="processing")
-    - uploaded_at: генерируется БД (server_default=func.now())
-    - detections_count: вычисляемое поле, в БД его нет
-    """
+    """Ответ API: id/status/uploaded_at приходят из БД,
+    detections_count и video_url вычисляются на лету."""
     id: int
     status: str
     uploaded_at: datetime | None = None
-    detections_count: int = 0  # количество детекций, считаем отдельным запросом
-    video_url: str | None = None # URL для просмотра из MinIO
+    detections_count: int = 0
+    video_url: str | None = None
 
-    # ConfigDict — настройка Pydantic
-    # from_attributes=True — разрешает читать данные из SQLAlchemy-объектов
-    # Раньше это называлось orm_mode = True (устарело)
+    # Разрешает читать данные из SQLAlchemy-объектов
     model_config = ConfigDict(from_attributes=True)

@@ -5,43 +5,26 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import settings
 
-# Настройка логгера
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
 logger = logging.getLogger(__name__)
 
-# create_engine — "движок" подключения
 # echo=False — не показывать SQL в консоли (поставь True для дебага)
 engine = create_engine(settings.database_url, echo=False)
 
-# sessionmaker — фабрика сессий
-# Сессия = единица работы с БД: открыл → сделал запросы → закрыл (commit)
-# autoflush=False, autocommit=False — контролируем когда данные реально записываются
+# autoflush/autocommit выключены: когда данные реально записываются,
+# контролируют бизнес-код (commit в роутах/задачах), а не ORM.
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-# Base — базовый класс для всех моделей
-# Все модели (Video, Detection) наследуются от него
-# Он знает про engine и может создавать/удалять таблицы
 Base = declarative_base()
 
-# Зависимость для FastAPI — будет создавать сессию на каждый запрос
+
 def get_db():
-    """
-    Каждому запросу к API — своя сессия с БД.
-
-    with next(get_db()) as db:
-        video = db.query(Video).first()
-
-    После обработки запроса — сессия закрывается автоматически.
-    """
+    """Зависимость для FastAPI: одна сессия на запрос, закрытие в любом случае."""
     db = SessionLocal()
     try:
-        yield db # Отдаём сессию, await не нужен — SQLAlchemy синхронный
+        yield db
     finally:
-        db.close() # Закрываем в любом случае — даже если была ошибка
+        db.close()
+
 
 def init_db():
     """Создаёт все таблицы по моделям (без Alembic)."""

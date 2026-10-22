@@ -4,73 +4,48 @@ from sqlalchemy.sql import func
 
 from app.core.database import Base
 
-# Base - базовый класс для всех моделей SQLAlchemy
-# Он связывает Python-класс с SQL-таблицей
-# Определяется в database.py
 
 class Video(Base):
-    """
-    Таблица videos - информация о загруженных видео.
-
-    Base.__tablename__ - имя таблицы в PostgreSQL
-    Column(...) описание колонки
-    """
+    """Загруженные видео."""
     __tablename__ = "videos"
 
-    # primary_key=True — это главный ключ, уникальный идентификатор
-    # autoincrement=True — PostgreSQL сама назначает id (1, 2, 3, ...)
     id = Column(Integer, primary_key=True, autoincrement=True)
-
-    # nullable=False - поле обязательное, нельзя оставлять пустым
     filename = Column(String(255), nullable=False)
     filepath = Column(String(512), nullable=True)
-    object_key = Column(String(512), nullable=True)     # ключ в MinIO (например, "videos/5.mp4")
+    object_key = Column(String(512), nullable=True)  # ключ в MinIO, напр. "videos/5.mp4"
 
-    # nullable=True — поле необязательное (значение может быть NULL)
     duration = Column(Float, nullable=True)
     fps = Column(Integer, nullable=True)
     resolution = Column(String(20), nullable=True)
-
-    # server_default=func.now() — при вставке PostgreSQL автоматически
-    # подставит текущее время
     uploaded_at = Column(DateTime, server_default=func.now())
 
-    # Статус обработки: processing -> completed / failed
+    # Статус обработки: processing -> completed / partial / failed
     status = Column(String(20), nullable=False, default="processing")
-
     task_id = Column(String(255), nullable=True)  # ID Celery-задачи
 
-    # relationship — НЕ колонка в БД. Это Python-атрибут для удобного доступа.
-    # video.detections → список всех Detection для этого видео
-    # back_populates — двусторонняя связь: Video знает свои Detection,
-    # Detection знает свой Video
+    # cascade: удаление Video автоматически удаляет его Detection
     detections = relationship("Detection", back_populates="video", cascade="all, delete-orphan")
 
-    # cascade="all, delete-orphan" — если удалить Video,
-    # автоматически удалятся все его Detection
 
 class Detection(Base):
-    """Таблица detections - найденные объекты."""
+    """Найденные объекты — общая таблица для видео и стримов."""
     __tablename__ = "detections"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-
     video_id = Column(Integer, ForeignKey("videos.id", ondelete="CASCADE"), nullable=True)
     stream_id = Column(Integer, ForeignKey("streams.id", ondelete="CASCADE"), nullable=True)
 
     frame_index = Column(Integer, nullable=False)
     class_name = Column(String(50), nullable=False)
     confidence = Column(Float, nullable=False)
-
     bbox_x1 = Column(Float, nullable=False)
     bbox_y1 = Column(Float, nullable=False)
     bbox_x2 = Column(Float, nullable=False)
     bbox_y2 = Column(Float, nullable=False)
 
-    # Видео: секунда от начала файла (5.0, 10.5, ...)
+    # ДВЕ системы времени: timestamp — секунда от начала файла (только видео),
+    # detected_at — реальное время детекции (работает и для файлов, и для стримов).
     timestamp = Column(Float, nullable=True)
-
-    # Реальное время детекции — работает И для файлов И для стримов
     detected_at = Column(DateTime, server_default=func.now(), nullable=False)
 
     video = relationship("Video", back_populates="detections")
@@ -85,13 +60,14 @@ class Detection(Base):
         Index("idx_detections_stream_class", "stream_id", "class_name"),
     )
 
+
 class Stream(Base):
-    """Таблица streams - RTSP/IP камеры."""
+    """RTSP/IP камеры."""
     __tablename__ = "streams"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255), nullable=False)           # "Парковка камера 1"
-    rtsp_url = Column(String(512), nullable=False)       # rtsp://...
+    name = Column(String(255), nullable=False)
+    rtsp_url = Column(String(512), nullable=False)
 
     # ДВА разных статуса — это ядро паттерна desired-state + reconciler.
     #
@@ -113,7 +89,7 @@ class Stream(Base):
     # превышен лимит рестартов»). Пусто, когда статуса ошибки нет.
     status_reason = Column(String(255), nullable=True)
 
-    fps = Column(Integer, nullable=True, default=5)      # частота захвата
+    fps = Column(Integer, nullable=True, default=5)
     created_at = Column(DateTime, server_default=func.now())
     pid = Column(Integer, nullable=True)
 

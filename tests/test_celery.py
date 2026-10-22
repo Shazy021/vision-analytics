@@ -1,9 +1,8 @@
 """
-Тесты для Celery-задач.
+Тесты Celery-задач.
 
-Проблема: в тестах не нужен настоящий Redis и воркер.
-Решение: CELERY_TASK_ALWAYS_EAGER = True — задачи выполняются
-синхронно, в том же процессе, без брокера.
+Eager mode: задачи выполняются синхронно в том же процессе —
+не нужен ни Redis, ни воркер.
 """
 from unittest.mock import MagicMock, patch
 
@@ -14,10 +13,6 @@ from app.tasks.processing import process_video_task
 
 @pytest.fixture(autouse=True)
 def celery_eager():
-    """
-    FORCE eager mode — задачи выполняются синхронно в тестах.
-    Не нужен Redis, не нужен воркер.
-    """
     from app.core.celery_app import celery_app
     celery_app.conf.update(
         task_always_eager=True,
@@ -33,7 +28,7 @@ def celery_eager():
 @patch("app.pipeline.processor.process_video")
 @patch("app.tasks.processing.SessionLocal")
 def test_process_video_task_success(mock_session_local, mock_process_video):
-    """Задача успешно обрабатывает видео"""
+    """Задача успешно обрабатывает видео."""
     mock_db = MagicMock()
     mock_session_local.return_value = mock_db
 
@@ -48,11 +43,11 @@ def test_process_video_task_success(mock_session_local, mock_process_video):
 @patch("app.pipeline.processor.process_video")
 @patch("app.tasks.processing.SessionLocal")
 def test_process_video_task_failure(mock_session_local, mock_process_video):
-    """Задача помечает результат как failed при ошибке"""
+    """При ошибке задача пробрасывает исключение, сессия закрывается."""
     mock_db = MagicMock()
     mock_session_local.return_value = mock_db
-
     mock_process_video.side_effect = Exception("YOLO crashed")
+
     with pytest.raises(Exception):
         process_video_task(video_id=2)
 
@@ -60,5 +55,5 @@ def test_process_video_task_failure(mock_session_local, mock_process_video):
 
 
 def test_process_video_task_has_queue():
-    """Задача привязана к очереди processing"""
+    """Задача привязана к очереди processing."""
     assert process_video_task.queue == "processing"
