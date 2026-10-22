@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -16,6 +17,8 @@ from app.schemas.video import VideoCreate, VideoRead
 # он тянет за собой processor → ultralytics → torch, а api живёт в лёгком
 # CPU-образе без torch (см. Dockerfile.cpu). Импортируем задачу лениво,
 # внутри функций, которые реально ею пользуются.
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/videos", tags=["Videos"])
 
@@ -74,21 +77,33 @@ def upload_video(
         shutil.copyfileobj(file.file, buffer)
 
     object_key = f"videos/{video.id}{ext}"
-    storage.upload_file(object_key, str(temp_path), content_type="video/mp4")
+    try:
+        storage.upload_file(object_key, str(temp_path), content_type="video/mp4")
 
-    # Удаляем временный файл — он в MinIO
-    os.remove(temp_path)
+        # Удаляем временный файл — он в MinIO
+        os.remove(temp_path)
 
-    # Сохраняем S3 ключ в БД
-    video.object_key = object_key
-    db.commit()
+        # Сохраняем S3 ключ в БД
+        video.object_key = object_key
+        db.commit()
 
-    # Отправляем задачу Celery (ленивый импорт — см. комментарий в шапке модуля)
-    from app.tasks.processing import process_video_task
+        # Отправляем задачу Celery (ленивый импорт — см. комментарий в шапке модуля)
+        from app.tasks.processing import process_video_task
 
-    task = process_video_task.delay(video.id)
-    video.task_id = task.id
-    db.commit()
+        task = process_video_task.delay(video.id)
+        video.task_id = task.id
+        db.commit()
+    except Exception:
+        # MinIO/Celery упали ПОСЛЕ создания записи в БД — помечаем failed,
+        # иначе видео висит в "processing" навечно, а файла в S3 нет.
+        logger.exception("Upload of video %s failed after DB record was created", video.id)
+        video.status = "failed"
+        db.commit()
+        temp_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to store the video or enqueue processing",
+        )
 
     video_read = VideoRead.model_validate(video)
     video_read.detections_count = 0

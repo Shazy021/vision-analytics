@@ -4,6 +4,8 @@
 TestClient — это "фейковый клиент" который делает HTTP-запросы
 без реального запуска сервера. Не нужен uvicorn, не нужен браузер.
 """
+from unittest.mock import patch
+
 import pytest
 
 from app.core.database import get_db
@@ -113,6 +115,22 @@ def test_get_video_not_found(client):
     """GET /api/videos/999 — видео не существует"""
     response = client.get("/api/videos/999")
     assert response.status_code == 404
+
+
+def test_upload_marks_failed_when_storage_down(client):
+    """MinIO упал после создания записи в БД → видео failed, а не вечный processing."""
+    with patch("app.core.storage.upload_file", side_effect=Exception("MinIO down")):
+        response = client.post(
+            "/api/videos/upload",
+            files={"file": ("clip.mp4", b"0" * 100, "video/mp4")},
+        )
+    assert response.status_code == 500
+
+    db = _db_session()
+    video = db.get(Video, 1)
+    assert video.status == "failed"
+    assert video.object_key is None
+    db.close()
 
 
 # ============================================================
