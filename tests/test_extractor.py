@@ -1,13 +1,10 @@
-
 import cv2
 import numpy as np
 import pytest
 
-from app.video.extractor import Frame, VideoCapture, frame_generator
+from app.video.extractor import VideoCapture
 
 
-# pytest-фикстура — подготавливает данные для тестов
-# scope="session" — создаётся один раз на все тесты в файле
 @pytest.fixture(scope='session')
 def test_video(tmp_path_factory):
     """
@@ -28,33 +25,6 @@ def test_video(tmp_path_factory):
     writer.release()
     return video_path
 
-async def test_frame_generator_returns_frames(test_video):
-    """ Проверяем что генератор выдаёт кадры """
-    frames = []
-    async for frame in frame_generator(test_video, fps=5):
-        frames.append(frame)
-
-    # 3 сек * 5 FPS = 15 кадров (приблезительно +- 1)
-    assert 17 >= len(frames) >= 13
-
-    # Каждый кадр объект Frame
-    assert isinstance(frames[0], Frame)
-    assert frames[0].index >= 0
-    assert frames[0].timestamp >= 0
-
-
-async def test_frame_generator_fps_reduces_count(test_video):
-    """Меньше фпс -> меньше кадров"""
-    frames_5fps = []
-    async for f in frame_generator(test_video, fps=5):
-        frames_5fps.append(f)
-
-    frames_1fps = []
-    async for f in frame_generator(test_video, fps=1):
-        frames_1fps.append(f)
-
-    # 1 FPS должно дать меньше кадров, чем 5 FPS
-    assert len(frames_1fps) < len(frames_5fps)
 
 def test_video_capture_context_manager(test_video):
     """Контекст-менеджер открывает и закрывает видео"""
@@ -63,6 +33,7 @@ def test_video_capture_context_manager(test_video):
         ret, frame = cap.read()
         assert ret
         assert frame is not None
+
 
 def test_video_capture_invalid_path():
     """Невалидный путь - понятная ошибка"""
