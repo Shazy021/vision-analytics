@@ -27,7 +27,7 @@ cp .env.example .env
 docker-compose up -d
 ```
 
-Поднимутся 12 сервисов: db, redis, kafka, kafka-init (разовый — создаёт топики), api, worker (x2), flower, dashboard, yolo-consumer, detection-consumer, mediamtx.
+Поднимутся 13 сервисов (14 контейнеров с учётом worker ×2): db, redis, minio, kafka, kafka-init (разовый — создаёт топики), api, worker (x2), flower, dashboard, stream-manager, yolo-consumer, detection-consumer, mediamtx.
 
 > 🔐 Пароли/ключи задаются переменными в `.env` (${VAR:-default} в compose).
 > В репозитории только безопасные дев-дефолты — для прода переопредели их в `.env`.
@@ -275,7 +275,7 @@ Kafka — транспорт, не хранилище. Все детекции �
 │   └── app.py               # Streamlit dashboard
 ├── alembic/                 # Database migrations
 ├── tests/                   # Test suite
-├── docker-compose.yml       # 12 services (kafka-init — разовый)
+├── docker-compose.yml       # 13 services (kafka-init — разовый)
 ├── Dockerfile               # CUDA-образ: worker, yolo-consumer (инференс)
 ├── Dockerfile.cpu           # CPU-образ: api, flower, detection-consumer, dashboard
 ├── requirements.txt         # зависимости CUDA-образа (torch/ultralytics)

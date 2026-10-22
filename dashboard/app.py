@@ -992,17 +992,17 @@ elif page == "📡 Стримы":
 
     with st.expander("ℹ️ Стрим не работает — где смотреть причину"):
         st.code(
-            "# Producer стрима — это subprocess внутри контейнера api,\n"
+            "# Producer стрима — это subprocess внутри контейнера stream-manager,\n"
             "# его логи (и падения) прилетают сюда:\n"
-            "docker compose logs api --tail 50\n\n"
+            "docker compose logs stream-manager --tail 50\n\n"
             "# Инференс (YOLO) и запись в БД:\n"
             "docker compose logs yolo-consumer --tail 30\n"
             "docker compose logs detection-consumer --tail 30\n\n"
             "# Топики Kafka (создаются сервисом kafka-init):\n"
             "docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list\n\n"
             "# Ручной запуск producer (адрес — с точки зрения КОНТЕЙНЕРА!):\n"
-            "docker compose exec api python -m app.streaming.producer rtsp://mediamtx:8554/mystream 5 1\n\n"
+            "docker compose exec stream-manager python -m app.streaming.producer rtsp://mediamtx:8554/mystream 5 1\n\n"
             "# Тест без камеры: положи .mp4 в ./uploads — в контейнере это /app/uploads/…\n"
-            "docker compose exec api python -m app.streaming.producer /app/uploads/demo.mp4 5 1",
+            "docker compose exec stream-manager python -m app.streaming.producer /app/uploads/demo.mp4 5 1",
             language="bash",
         )
