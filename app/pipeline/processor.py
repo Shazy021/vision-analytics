@@ -7,6 +7,7 @@ Phase 4: Видео читается НАПРЯМУЮ из MinIO по HTTP.
 OpenCV (cv2.VideoCapture) поддерживает HTTP URL —
 никакого скачивания на диск.
 """
+import logging
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -16,6 +17,8 @@ from app.core.config import settings
 from app.db.models import Detection, Video
 from app.detection.yolo import YOLODetector
 from app.video.extractor import VideoCapture
+
+logger = logging.getLogger(__name__)
 
 
 def _get_video_source(video: Video) -> str:
@@ -28,11 +31,11 @@ def _get_video_source(video: Video) -> str:
     """
     if video.object_key:
         url = storage.get_presigned_url(video.object_key, expires_hours=24)
-        print(f"[Processor] Reading {video.object_key} directly from MinIO via HTTP")
+        logger.info("Reading %s directly from MinIO via HTTP", video.object_key)
         return url
 
     if video.filepath and Path(video.filepath).exists():
-        print(f"[Processor] Reading from local disk: {video.filepath}")
+        logger.info("Reading from local disk: %s", video.filepath)
         return video.filepath
 
     raise FileNotFoundError(
@@ -86,8 +89,11 @@ def process_video(video_id: int, db: Session) -> None:
             step = max(1, int(fps / extract_fps)) if fps > 0 else 1
 
             frames_to_process = total_frames // step
-            print(f"Video: {total_frames} frames, {fps} fps, "
-                  f"extracting every {step}th = ~{frames_to_process} frames to process")
+            logger.info(
+                "Video: %d frames, %s fps, extracting every %dth "
+                "= ~%d frames to process",
+                total_frames, fps, step, frames_to_process,
+            )
 
             hit_limit = False
 
@@ -101,8 +107,10 @@ def process_video(video_id: int, db: Session) -> None:
 
                     processed = frame_index // step
                     if processed % 50 == 0:
-                        print(f"Processing frame {frame_index}/{total_frames} "
-                              f"({processed}/{frames_to_process})...")
+                        logger.info(
+                            "Processing frame %d/%d (%d/%d)...",
+                            frame_index, total_frames, processed, frames_to_process,
+                        )
 
                     detections = detector.detect(
                         frame,
@@ -114,7 +122,7 @@ def process_video(video_id: int, db: Session) -> None:
                 frame_index += 1
 
                 if settings.max_frames > 0 and frame_index >= settings.max_frames:
-                    print(f"Reached max_frames limit ({settings.max_frames}), stopping")
+                    logger.info("Reached max_frames limit (%s), stopping", settings.max_frames)
                     hit_limit = True
                     break
 
@@ -147,7 +155,7 @@ def process_video(video_id: int, db: Session) -> None:
         video.status = "partial" if hit_limit else "completed"
         db.commit()
 
-        print(f"Processed video {video_id}: {len(all_detections)} detections found")
+        logger.info("Processed video %s: %d detections found", video_id, len(all_detections))
 
     except Exception:
         video.status = "failed"

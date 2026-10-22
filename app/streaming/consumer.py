@@ -66,9 +66,9 @@ class DetectionConsumer:
                 db.add(db_obj)
             db.commit()
             logger.info(f"Saved {len(detection.get('objects', []))} detections for frame #{detection['frame_index']}")
-        except Exception as e:
+        except Exception:
             db.rollback()
-            print(f"Error saving to DB: {e}")
+            logger.exception("Error saving to DB")
         finally:
             db.close()
 
