@@ -2,7 +2,7 @@
 Единая точка конфигурации всего приложения.
 
 Все настройки читаются из окружения / .env через pydantic-settings.
-Приоритет: os.environ (Docker, CI) > .env > дефолты из класса.
+Приоритет: os.environ (Docker, CI) > .env.local > .env > дефолты из класса.
 
 Благодаря этому в проекте один источник правды о конфиге:
 - API, Celery-воркеры, Kafka-консьюмеры и тесты читают один и тот же Settings
@@ -69,7 +69,11 @@ class Settings(BaseSettings):
     # а docker-compose (например POSTGRES_USER для контейнера db, API_URL для
     # сервисов compose). По умолчанию pydantic-settings forbids такие ключи
     # и роняет Settings с ValidationError — игнорируем их вместо падения.
-    model_config = ConfigDict(env_file=".env", extra="ignore")
+    #
+    # env_file списком: .env.local перечитывается ПОСЛЕ .env и переопределяет
+    # его — в нём держат локальные хосты (localhost вместо docker-имён db/kafka)
+    # для запуска alembic/скриптов с хостовой машины. .env.local в .gitignore.
+    model_config = ConfigDict(env_file=(".env", ".env.local"), extra="ignore")
 
     @field_validator("device", mode="before")
     @classmethod
