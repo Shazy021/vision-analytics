@@ -112,6 +112,12 @@ ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transp
 
 Пайплайн: Producer → Kafka (`raw_frames`) → YOLO Consumer → Kafka (`detections`) → Detection Consumer → PostgreSQL.
 
+> 📡 **Публичные камеры без MediaMTX.** Producer открывает и HLS-ссылки
+> (`https://.../playlist.m3u8`) напрямую — вставь такой URL веб-камеры прямо
+> в форму стрима. Браузерный User-Agent отправляется автоматически: часть CDN
+> (включая idnes.cz) отдаёт HLS только «браузерным» клиентам. Сетевой сбой HLS
+> producer переживает реконректом на месте, не дожидаясь reconciler'а.
+
 ### Стримы не работают — чек-лист
 
 Механика: кнопка ▶️ Запустить пишет намерение (`desired_status=active`) в БД, а **reconciler в контейнере `stream_manager`** поднимает producer subprocess'ом и следит, чтобы он оставался живым.

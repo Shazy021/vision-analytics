@@ -691,11 +691,14 @@ elif page == "📡 Стримы":
         st.session_state.last_refresh = time.time()
 
     # Добавить стрим
-    st.subheader("➕ Добавить RTSP стрим")
+    st.subheader("➕ Добавить стрим")
 
     with st.form("add_stream"):
         stream_name = st.text_input("Название", placeholder="Парковка камера 1")
-        rtsp_url = st.text_input("RTSP URL", placeholder="rtsp://admin:pass@192.168.1.100:554/stream")
+        rtsp_url = st.text_input(
+            "URL источника (RTSP / HLS)",
+            placeholder="rtsp://... или https://example.com/cam/playlist.m3u8",
+        )
         stream_fps = st.slider("Частота захвата (FPS)", 1, 10, 5)
         submitted = st.form_submit_button("Добавить стрим")
 

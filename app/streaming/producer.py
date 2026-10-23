@@ -1,4 +1,4 @@
-"""Kafka Producer — читает источник (RTSP / файл) и шлёт кадры в топик raw_frames
+"""Kafka Producer — читает источник (RTSP / HLS / файл) и шлёт кадры в топик raw_frames
 
 Запускается как subprocess сервисом stream_manager
 (app/streaming/manager.py — reconcile loop), поэтому:
@@ -28,6 +28,15 @@ logger = logging.getLogger(__name__)
 RTSP_CAPTURE_ENV = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
 RTSP_CAPTURE_OPTS = "rtsp_transport;tcp"
 
+# HLS (.m3u8 по http/https) — тоже live-источник: кадры прибывают в реальном
+# темпе, как с RTSP-камеры, а не читаются «на всю скорость диска» из файла.
+# Многие публичные HLS-плейлисты (напр. веб-камеры) отдают 403/пустой ответ
+# дефолтному юзер-агенту FFmpeg, поэтому для http(s) шлём браузерный UA.
+HTTP_UA_OPTS = (
+    "user_agent;Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36"
+)
+
 OPEN_ATTEMPTS = 3      # сколько раз пробуем открыть источник
 OPEN_RETRY_DELAY = 3   # пауза между попытками, сек
 
@@ -37,6 +46,21 @@ OPEN_RETRY_DELAY = 3   # пауза между попытками, сек
 # НЕ завися от того, сколько секунд заняли попытки открытия. Синхронизировано
 # с EXIT_OPEN_FAILED в app/streaming/manager.py.
 EXIT_OPEN_FAILED = 42
+
+
+def _is_rtsp(source: object) -> bool:
+    return str(source).lower().startswith("rtsp://")
+
+
+def _is_http(source: object) -> bool:
+    return str(source).lower().startswith(("http://", "https://"))
+
+
+def _is_hls(source: object) -> bool:
+    """HLS-плейлист (.m3u8) — live-поток по http. Прогрессивный mp4 по http
+    (.mp4) — это «файл по сети»: читается быстро, требует эмуляции реального
+    времени, как локальный файл. Различаем по расширению плейлиста."""
+    return _is_http(source) and ".m3u8" in str(source).lower()
 
 
 class FrameProducer:
@@ -62,8 +86,11 @@ class FrameProducer:
         и «стрим не робил» без единой строчки в логах — теперь причина видна
         в `docker compose logs stream-manager`.
         """
-        os.environ.setdefault(RTSP_CAPTURE_ENV, RTSP_CAPTURE_OPTS)
-        is_rtsp = str(self.source).lower().startswith("rtsp://")
+        os.environ.setdefault(
+            RTSP_CAPTURE_ENV,
+            HTTP_UA_OPTS if _is_http(self.source) else RTSP_CAPTURE_OPTS,
+        )
+        is_rtsp = _is_rtsp(self.source)
 
         for attempt in range(1, OPEN_ATTEMPTS + 1):
             cap = cv2.VideoCapture(self.source)
@@ -83,6 +110,13 @@ class FrameProducer:
                 "rtsp://mediamtx:8554/<path>, для источника на хосте — "
                 "rtsp://host.docker.internal:<port>/<path>. Убедись, что в источник "
                 "кто-то ПУБЛИКУЕТ поток (MediaMTX сам видео не генерирует)."
+            )
+        elif _is_hls(self.source):
+            hint = (
+                "HLS-плейлист должен открываться ИЗ контейнера stream-manager "
+                "(нужен исходящий доступ в интернет). Проверить из контейнера: "
+                f"docker compose exec stream-manager python -c \"import cv2; "
+                f"print(cv2.VideoCapture({str(self.source)!r}).isOpened())\""
             )
         else:
             hint = (
@@ -134,8 +168,12 @@ class FrameProducer:
         # Файл в роли «стрима» зацикливаем: стрим бесконечен по определению,
         # а одиночный проход файла завершает процесс через N секунд
         # и стрим сам собой «умирает» — сбивает с толку.
-        is_rtsp = str(self.source).lower().startswith("rtsp://")
-        loop_file = not is_rtsp and self.stream_id is not None
+        # Для HLS этот же путь работает как реконнект: сетевой сбой читается
+        # как EOF, переподключение на месте дешевле, чем смерть процесса
+        # (3 быстрых падения подряд уводят стрим в error у reconciler'а).
+        is_rtsp = _is_rtsp(self.source)
+        is_hls = _is_hls(self.source)
+        reopen_on_end = not is_rtsp and self.stream_id is not None
 
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
         frame_interval = max(1, int(src_fps / self.fps))
@@ -144,30 +182,34 @@ class FrameProducer:
         frame_index = self._initial_frame_index()
         sent_count = 0
 
-        # Для файлов эмулируем реальное время: RTSP и так идёт в реальном темпе
-        # (кадры прибывают с камеры), а файл читается быстрее некуда — без паузы
-        # он завалит Kafka кадрами со скоростью диска вместо заявленных fps.
-        is_file = not is_rtsp
+        # Для файлов эмулируем реальное время: RTSP и HLS и так идут в реальном
+        # темпе (кадры прибывают с камеры), а файл читается быстрее некуда — без
+        # паузы он завалит Kafka кадрами со скоростью диска вместо заявленных fps.
+        is_file = not is_rtsp and not is_hls
         frame_period = 1.0 / src_fps
         next_read = time.monotonic()
 
         logger.info(
             "Streaming → Kafka '%s' at %d fps (source=%s, stream_id=%s%s)",
             TOPIC_RAW_FRAMES, self.fps, self.source, self.stream_id,
-            ", loop" if loop_file else "",
+            ", loop" if reopen_on_end else "",
         )
 
         try:
             while True:
                 ret, frame = cap.read()
                 if not ret:
-                    if loop_file:
+                    if reopen_on_end:
                         cap.release()
+                        time.sleep(OPEN_RETRY_DELAY)
                         cap = cv2.VideoCapture(self.source)
                         if not cap.isOpened():
-                            logger.error("Файл перестал открываться на новом витке — останавливаюсь")
+                            logger.error("Источник перестал открываться — останавливаюсь")
                             break
-                        logger.info("Файл закончился — начинаю заново (live-симуляция)")
+                        logger.info(
+                            "Файл закончился — начинаю заново (live-симуляция)" if is_file
+                            else "Чтение HLS прервалось — реконнект"
+                        )
                         continue
                     logger.info(
                         "Источник закончился. Кадров прочитано: %d, отправлено: %d",
