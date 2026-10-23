@@ -101,6 +101,9 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
       DEVICE: ${DEVICE:-auto}
+      # Путь к весам YOLO; каталог models_cache/ — volume, переживающий
+      # пересборки образов (Ultralytics докачает веса сам при первом старте).
+      WEIGHTS_PATH: ${WEIGHTS_PATH:-yolov8n.pt}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin123}
@@ -224,11 +227,19 @@ services:
       dockerfile: Dockerfile
     image: vap-cuda:latest
     # Устройство не передаём аргументом — берётся из DEVICE (env ниже):
-    # auto → cuda на GPU-машине, cpu без неё
-    command: python -m app.streaming.yolo_consumer yolov8n.pt
+    # auto → cuda на GPU-машине, cpu без неё. Веса — из WEIGHTS_PATH (env),
+    # не из CLI-аргумента: аргумент имеет приоритет над настройками и
+    # захардкодил бы yolov8n навсегда.
+    command: python -m app.streaming.yolo_consumer
+    # Липкая CUDA-ошибка убивает контекст в процессе — consumer сам выходит
+    # с кодом 1 (см. yolo_consumer.py), а супервизор поднимает новый процесс
+    # со свежим контекстом. Без этого GPU-сбой превращается в зомби, который
+    # вечно «скипает» кадры и сжигает offset'ы.
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
       DEVICE: ${DEVICE:-auto}
+      WEIGHTS_PATH: ${WEIGHTS_PATH:-yolov8n.pt}
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}

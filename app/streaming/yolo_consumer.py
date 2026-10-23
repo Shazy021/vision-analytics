@@ -23,6 +23,26 @@ from app.streaming.topics import (
 
 logger = logging.getLogger(__name__)
 
+# CUDA sticky error (CUDA_ERROR_UNKNOWN, illegal memory access, ECC):
+# контекст мёртв, и КАЖДЫЙ последующий вызов будет падать — восстановление
+# внутри процесса невозможно. Единственный правильный вариант — выйти с
+# ненулевым кодом, чтобы супервизор (docker restart) поднял свежий процесс
+# со свежим CUDA-контекстом.
+MAX_CONSECUTIVE_FAILURES = 10
+
+
+def _is_fatal_cuda_error(exc: BaseException) -> bool:
+    """Sticky CUDA error: torch.AcceleratorError или сообщение 'CUDA error'.
+
+    Проверяем по имени класса, а не через isinstance(torch.AcceleratorError),
+    чтобы не тянуть torch в импорт модуля (он нужен только в рантайме YOLO).
+    OOM ('CUDA out of memory') сюда НЕ попадает — он не липкий.
+    """
+    if type(exc).__name__ == "AcceleratorError":
+        return True
+    text = str(exc)
+    return "CUDA error" in text or "cuCtxSynchronize" in text
+
 # Импортируем storage один раз при загрузке модуля.
 # Если MinIO недоступен — упадёт сразу с понятной ошибкой,
 # а не будет молча глотать ошибки на каждом кадре.
@@ -80,6 +100,7 @@ class YOLOConsumer:
             logger.info("[YOLO Consumer] Stream frames will NOT be saved (MinIO unavailable)")
 
         self.poison_count = 0
+        self.consecutive_failures = 0
 
         try:
             while True:
@@ -92,13 +113,35 @@ class YOLOConsumer:
 
                 try:
                     self._handle(msg)
-                except Exception:
+                    self.consecutive_failures = 0
+                except Exception as exc:
                     self.poison_count += 1
+                    self.consecutive_failures += 1
                     topic_name = msg.topic()
                     offset = msg.offset()
+                    if _is_fatal_cuda_error(exc):
+                        # Липкая CUDA-ошибка: следующий кадр упадёт так же,
+                        # и следующий, и дальше вечно — «пропуск» тут только
+                        # сжигает offset'ы. Выходим, контейнер рестартует
+                        # (restart-политика) с чистым CUDA-контекстом.
+                        logger.critical(
+                            f"CUDA context is dead (topic={topic_name} offset={offset}): {exc}. "
+                            "Sticky CUDA errors are unrecoverable in-process — "
+                            "exiting, the supervisor will restart the consumer.",
+                        )
+                        raise SystemExit(1)
                     logger.exception(
                         f"Poison message skipped: topic={topic_name} offset={offset} (total {self.poison_count})",
                     )
+                    if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        # Не CUDA, но тоже зомби-режим (например, перманентный OOM):
+                        # N подряд падений — надёжнее рестартнуться, чем молча
+                        # сжигать кадры.
+                        logger.critical(
+                            f"{self.consecutive_failures} consecutive failures — "
+                            "exiting for restart.",
+                        )
+                        raise SystemExit(1)
 
         except KeyboardInterrupt:
             logger.info("Stopping...")
@@ -162,7 +205,11 @@ class YOLOConsumer:
 
 if __name__ == "__main__":
     import sys
-    model = sys.argv[1] if len(sys.argv) > 1 else "yolov8n.pt"
+
+    # Веса: аргумент CLI > WEIGHTS_PATH (settings). Без аргумента — None,
+    # чтобы YOLOConsumer взял путь из настроек; fallback "yolov8n.pt" здесь
+    # захардкодил бы nano навсегда, как бы ни был озаглавлен compose-команд.
+    model = sys.argv[1] if len(sys.argv) > 1 else None
     # Без явного аргумента устройство берётся из настроек:
     # DEVICE=auto → cuda при наличии GPU, иначе cpu (проект не падает без NVIDIA)
     device = sys.argv[2] if len(sys.argv) > 2 else None

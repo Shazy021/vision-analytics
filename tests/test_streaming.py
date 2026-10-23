@@ -1,6 +1,7 @@
 """Тесты для Kafka streaming модуля"""
 from unittest.mock import MagicMock, patch
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -74,6 +75,50 @@ class TestYOLOConsumer:
         consumer.run()
 
         assert consumer.poison_count == 1
+
+    def _make_bad_msg(self):
+        bad_msg = MagicMock()
+        bad_msg.value.return_value = b'{"frame_data": "", "frame_index": 1, "source": "s", "stream_id": 1}'
+        bad_msg.error.return_value = None
+        bad_msg.topic.return_value = "raw_frames"
+        bad_msg.offset.return_value = 7
+        return bad_msg
+
+    def test_sticky_cuda_error_exits_for_restart(self):
+        """Липкая CUDA-ошибка — не poison message: процесс обязан выйти,
+        иначе зомби-консумер вечно сжигает offset'ы мёртвым CUDA-контекстом."""
+        consumer = self._make_consumer()
+        consumer.model.side_effect = RuntimeError("CUDA error: unknown error")
+
+        def fake_poll(timeout):
+            if not fake_poll.called:
+                fake_poll.called = True
+                return self._make_bad_msg()
+            raise AssertionError("run() должен выйти до следующего poll")
+
+        fake_poll.called = False
+        consumer.consumer.poll.side_effect = fake_poll
+
+        with patch("app.streaming.yolo_consumer.cv2.imdecode", return_value=MagicMock()):
+            with pytest.raises(SystemExit) as exc_info:
+                consumer.run()
+        assert exc_info.value.code == 1
+        consumer.consumer.close.assert_called_once()
+
+    def test_consecutive_failures_trigger_restart(self):
+        """N подряд не-CUDA падений — тоже выход, а не бесконечный skip."""
+        consumer = self._make_consumer()
+        consumer.model.side_effect = RuntimeError("boom")
+
+        def fake_poll(timeout):
+            return self._make_bad_msg()
+
+        consumer.consumer.poll.side_effect = fake_poll
+
+        with pytest.raises(SystemExit) as exc_info:
+            consumer.run()
+        assert exc_info.value.code == 1
+        assert consumer.poison_count == 10
 
 # ---- Тесты DetectionConsumer ----
 
