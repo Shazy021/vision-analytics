@@ -85,17 +85,32 @@ def process_video(video_id: int, db: Session) -> None:
             total_frames = int(cap.get(7))
             duration = total_frames / fps if fps > 0 else 0
 
-            extract_fps = settings.extract_fps
+            # Параметры разбора: оверрайд конкретного видео (выбран при
+            # загрузке), None = платформенные дефолты из settings.
+            extract_fps = video.extract_fps or settings.extract_fps
+            max_frames = settings.max_frames if video.max_frames is None else video.max_frames
             step = max(1, int(fps / extract_fps)) if fps > 0 else 1
 
             frames_to_process = total_frames // step
+            # Сколько реально разберём: лимит max_frames считается по
+            # прочитанным кадрам, в единицах выборки это max_frames // step.
+            target_frames = frames_to_process
+            if max_frames > 0:
+                target_frames = min(target_frames, max(1, max_frames // step))
             logger.info(
                 "Video: %d frames, %s fps, extracting every %dth "
-                "= ~%d frames to process",
-                total_frames, fps, step, frames_to_process,
+                "= ~%d frames to process (target %d with limit)",
+                total_frames, fps, step, frames_to_process, target_frames,
             )
 
+            # Цель прогресса известна до первого кадра — дашборд сразу может
+            # рисовать процент, а не «неизвестно из неизвестного».
+            video.frames_to_process = target_frames
+            video.processed_frames = 0
+            db.commit()
+
             hit_limit = False
+            processed = 0
 
             while True:
                 ret, frame = cap.read()
@@ -105,12 +120,16 @@ def process_video(video_id: int, db: Session) -> None:
                 if frame_index % step == 0:
                     timestamp = frame_index / fps if fps > 0 else 0.0
 
-                    processed = frame_index // step
-                    if processed % 50 == 0:
+                    processed += 1
+                    if processed % 50 == 1:
                         logger.info(
                             "Processing frame %d/%d (%d/%d)...",
-                            frame_index, total_frames, processed, frames_to_process,
+                            frame_index, total_frames, processed, target_frames,
                         )
+                        # Прогресс — факт в БД (см. Video.frames_to_process):
+                        # дашборд опрашивает API, воркеру не нужен result backend.
+                        video.processed_frames = processed
+                        db.commit()
 
                     detections = detector.detect(
                         frame,
@@ -121,8 +140,8 @@ def process_video(video_id: int, db: Session) -> None:
 
                 frame_index += 1
 
-                if settings.max_frames > 0 and frame_index >= settings.max_frames:
-                    logger.info("Reached max_frames limit (%s), stopping", settings.max_frames)
+                if max_frames > 0 and frame_index >= max_frames:
+                    logger.info("Reached max_frames limit (%s), stopping", max_frames)
                     hit_limit = True
                     break
 
@@ -148,6 +167,7 @@ def process_video(video_id: int, db: Session) -> None:
         # ============================================================
         video.duration = duration
         video.fps = int(fps) if fps > 0 else None
+        video.processed_frames = processed
 
         # ============================================================
         # Шаг 8: Ставим статус "completed"

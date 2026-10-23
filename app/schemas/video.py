@@ -32,6 +32,14 @@ class VideoRead(VideoBase):
     uploaded_at: datetime | None = None
     detections_count: int = 0
     video_url: str | None = None
+    # Прогресс обработки: цель (с учётом шага выборки и max_frames) и
+    # текущая позиция. None, пока processor не открыл файл.
+    frames_to_process: int | None = None
+    processed_frames: int | None = None
+    # Параметры разбора этого видео (оверрайд при загрузке).
+    # None = применялись платформенные дефолты.
+    extract_fps: int | None = None
+    max_frames: int | None = None
 
     # Разрешает читать данные из SQLAlchemy-объектов
     model_config = ConfigDict(from_attributes=True)

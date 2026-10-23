@@ -23,6 +23,21 @@ class Video(Base):
     status = Column(String(20), nullable=False, default="processing")
     task_id = Column(String(255), nullable=True)  # ID Celery-задачи
 
+    # Прогресс обработки: факт, который пишет worker по ходу дела,
+    # читает дашборд. Тот же принцип, что у desired/status у стримов:
+    # прогресс живёт в БД, а не в памяти воркера, — переживает рестарты
+    # и виден любому клиенту. nullable, пока процессор не открыл файл
+    # и не посчитал, сколько кадров вообще придётся разобрать.
+    frames_to_process = Column(Integer, nullable=True)
+    processed_frames = Column(Integer, nullable=True)
+
+    # Параметры разбора для КОНКРЕТНОГО видео (выбираются при загрузке).
+    # None = использовать платформенные дефолты (settings.extract_fps /
+    # settings.max_frames). Короткие ролики можно молотить чаще длинных,
+    # и наоборот — глобальная настройка на это не тянет.
+    extract_fps = Column(Integer, nullable=True)
+    max_frames = Column(Integer, nullable=True)
+
     # cascade: удаление Video автоматически удаляет его Detection
     detections = relationship("Detection", back_populates="video", cascade="all, delete-orphan")
 

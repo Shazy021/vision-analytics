@@ -4,11 +4,12 @@ import shutil
 from pathlib import Path
 
 import cv2
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import storage  # ← MinIO клиент (модуль, не класс)
+from app.core.config import settings
 from app.core.database import get_db
 from app.db.models import Detection, Video
 from app.schemas.video import VideoCreate, VideoRead
@@ -40,10 +41,16 @@ def create_video(video_in: VideoCreate, db: Session = Depends(get_db)):
 @router.post("/upload", response_model=VideoRead, status_code=201)
 def upload_video(
     file: UploadFile = File(...),
+    extract_fps: int | None = Form(None, ge=1, le=30),
+    max_frames: int | None = Form(None, ge=0),
     db: Session = Depends(get_db),
 ):
     """
     Загрузить видео-файл и запустить обработку в фоне.
+
+    Опциональные параметры разбора (иначе — платформенные дефолты):
+      extract_fps — как часто брать кадры (раз/с);
+      max_frames  — потолок прочитанных кадров (0 = без лимита).
 
     Flow:
     1. Создаём запись в БД (нужен ID для ключа в MinIO)
@@ -65,6 +72,8 @@ def upload_video(
     video = Video(
         filename=file.filename,
         status="processing",
+        extract_fps=extract_fps,
+        max_frames=max_frames,
     )
     db.add(video)
     db.commit()
@@ -129,6 +138,22 @@ def list_videos(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
         video_dict.detections_count = count
         result.append(video_dict)
     return result
+
+
+@router.get("/params")
+def processing_params():
+    """Параметры разбора видео: как часто берём кадры и потолок.
+
+    Дашборд показывает это рядом с прогрессом — «на скольких кадрах ищем»
+    нельзя вывести из данных клиента, это конфигурация пайплайна.
+
+    Объявлено ДО /{video_id}: FastAPI матчит маршруты по порядку, и без
+    этого «params» ушёл бы в валидацию int и получил 422.
+    """
+    return {
+        "extract_fps": settings.extract_fps,
+        "max_frames": settings.max_frames,
+    }
 
 
 @router.get("/{video_id}", response_model=VideoRead)

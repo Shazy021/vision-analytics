@@ -214,6 +214,7 @@ pre-commit install
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | /api/videos/upload | Загрузить видео и запустить обработку |
+| GET | /api/videos/params | Параметры разбора (частота выборки кадров, лимит) |
 | GET | /api/videos | Список всех видео |
 | GET | /api/videos/{id} | Информация о видео (+ video_url для браузера) |
 | GET | /api/videos/{id}/status | Статус обработки |
