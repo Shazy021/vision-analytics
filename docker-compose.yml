@@ -147,6 +147,11 @@ services:
     command: streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
     ports:
       - "8501:8501"
+    # Код дашборда и тема монтируются из репо: Streamlit сам перечитывает
+    # app.py при правках — не нужно пересобирать образ на каждую итерацию.
+    volumes:
+      - ./dashboard:/app/dashboard
+      - ./.streamlit:/app/.streamlit
     environment:
       API_URL: ${API_URL:-http://api:8000}
     depends_on:
