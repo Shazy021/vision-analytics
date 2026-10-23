@@ -42,7 +42,7 @@ API_URL = os.environ.get("API_URL", "http://localhost:8000")
 # ---- Палитра (должна совпадать с .streamlit/config.toml) ----
 CARD = "#1A1F2B"
 BORDER = "#2A3040"
-ACCENT = "#f2f5fc"
+ACCENT = "#a8bff5"
 MUTED = "#8B93A1"
 BG = "#0E1117"
 
@@ -140,6 +140,70 @@ def dark_fig(fig, height: int = 300):
     fig.update_xaxes(gridcolor=BORDER)
     fig.update_yaxes(gridcolor=BORDER)
     return fig
+
+
+def collapse_small(dist, min_pct: float = 1.0):
+    """Свернуть классы легче min_pct% в один серый «другое».
+
+    15 тонких секторов donut не читаются: подписи мелких секторов Plotly
+    выносит наружу, и они складываются в «гребёнку». Хвост оставляем
+    одним сектором — сумма долей остаётся 100%. «Другое» не чёрный ящик:
+    в него кладём members — человекочитаемый список свёрнутых классов,
+    donut_chart показывает его в hover.
+    """
+    total = sum(d["count"] for d in dist) or 1
+    big = [d for d in dist if d["count"] / total * 100 >= min_pct]
+    rest = sorted((d for d in dist if d["count"] / total * 100 < min_pct),
+                  key=lambda d: -d["count"])
+    if rest:
+        names = [f"{d['class_name']} ({d['count']})" for d in rest[:8]]
+        if len(rest) > 8:
+            names.append(f"и ещё {len(rest) - 8}")
+        big = big + [{
+            "class_name": "другое",
+            "count": sum(d["count"] for d in rest),
+            "members": ", ".join(names),
+        }]
+    return big or dist
+
+
+def donut_chart(dist, height: int = 320):
+    """Пончик распределения по классам.
+
+    Проценты рисуются только ВНУТРИ секторов >= 3% (textinfo="text" +
+    textposition="inside" — иначе Plotly выносит подписи мелких секторов
+    наружу); мелочь свёрнута в «другое»; точные значения — в hover.
+    """
+    if not dist:
+        return None
+    dist = collapse_small(dist)
+    total = sum(d["count"] for d in dist)
+    colors = {d["class_name"]: CHART_PALETTE[i % len(CHART_PALETTE)]
+              for i, d in enumerate(dist)}
+    colors["другое"] = "#57606A"
+    fig = px.pie(dist, values="count", names="class_name", hole=0.65,
+                 color="class_name", color_discrete_map=colors)
+    fig.add_annotation(text=f"<b>{total}</b>", showarrow=False,
+                       font=dict(size=26, color="#E6EDF3"))
+    # px.pie — ВСЕГДА один trace (color лишь красит сектора через
+    # color_discrete_map), поэтому списки text/customdata корректно
+    # сопоставляются с метками по индексу.
+    percents = [d["count"] / total * 100 for d in dist]
+    fig.update_traces(
+        marker=dict(line=dict(color=BG, width=2)),
+        text=[f"{p:.1f}%" if p >= 3 else "" for p in percents],
+        textinfo="text",
+        textposition="inside",
+        insidetextorientation="horizontal",
+        sort=True,
+        customdata=[d.get("members", "") for d in dist],
+        # У «другого» в customdata лежит список свёрнутых классов —
+        # показываем его второй строкой hover; у обычных секторов строка
+        # пустая. <extra></extra> глушит стандартный блок имени trace.
+        hovertemplate="%{label}: %{value} дет. (%{percent})"
+                      "<br>%{customdata}<extra></extra>",
+    )
+    return dark_fig(fig, height)
 
 
 # ============================================================
@@ -779,17 +843,7 @@ if page == "📹 Видео":
 
     with col1:
         if dist:
-            total = sum(item["count"] for item in dist)
-            fig = px.pie(dist, values="count", names="class_name", hole=0.65)
-            fig.add_annotation(
-                text=f"<b>{total}</b>", showarrow=False,
-                font=dict(size=26, color="#E6EDF3"),
-            )
-            fig.update_traces(
-                marker=dict(line=dict(color=BG, width=2)),
-                textinfo="percent",
-            )
-            st.plotly_chart(dark_fig(fig, 320), use_container_width=True)
+            st.plotly_chart(donut_chart(dist), use_container_width=True)
         else:
             empty_state("📊", "Нет данных по классам",
                         "Данные появятся после обработки видео.")
@@ -1228,18 +1282,7 @@ elif page == "📡 Стримы":
                     stream_id=sel_stream_id, source="stream"
                 )
                 if dist:
-                    total = sum(item["count"] for item in dist)
-                    fig = px.pie(dist, values="count", names="class_name",
-                                 hole=0.65, color_discrete_sequence=CHART_PALETTE)
-                    fig.add_annotation(
-                        text=f"<b>{total}</b>", showarrow=False,
-                        font=dict(size=26, color="#E6EDF3"),
-                    )
-                    fig.update_traces(
-                        marker=dict(line=dict(color=BG, width=2)),
-                        textinfo="percent",
-                    )
-                    st.plotly_chart(dark_fig(fig, 320), use_container_width=True)
+                    st.plotly_chart(donut_chart(dist), use_container_width=True)
                 else:
                     empty_state("📊", "Нет данных", "Детекции появятся при работе стрима.")
 
