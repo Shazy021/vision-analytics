@@ -4,6 +4,16 @@
 
 Платформа видеоаналитики: загрузка видео / RTSP-стрим → YOLO-детекция → Kafka → PostgreSQL → REST API → Streamlit-дашборд.
 
+## Демо
+
+Живые записи работы дашборда — страница 📹 Видео (обработанный ролик с двойным плеером) и страница 📡 Стримы (поток в реальном времени):
+
+<p align="center"><img src="demos/Videos.gif" alt="Страница Видео: двойной плеер с кадрами и детекциями"></p>
+
+<p align="center"><img src="demos/Streams.gif" alt="Страница Стримы: последние кадры и детекции стрима"></p>
+
+<p align="center"><img src="demos/analytics.png" alt="Страница Аналитика: распределение классов и детекции по времени"><br><em>📊 Аналитика — распределение детекций по классам и по времени.</em></p>
+
 ## Стек
 
 - **API**: FastAPI, Pydantic, SQLAlchemy
@@ -28,6 +38,8 @@ docker-compose up -d
 ```
 
 Поднимутся 13 сервисов (14 контейнеров с учётом worker ×2): db, redis, minio, kafka, kafka-init (разовый — создаёт топики), api, worker (x2), flower, dashboard, stream-manager, yolo-consumer, detection-consumer, mediamtx.
+
+<p align="center"><img src="demos/docker-compose-ps.png" alt="Docker Desktop: все сервисы стека подняты"><br><em><code>kafka-init</code> в сером статусе — это норма: разовый контейнер создал топики и штатно завершился.</em></p>
 
 > 🔐 Пароли/ключи задаются переменными в `.env` (${VAR:-default} в compose).
 > В репозитории только безопасные дев-дефолты — для прода переопредели их в `.env`.
@@ -111,6 +123,8 @@ ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transp
 **Шаг 3.** Нажать ▶️ Запустить — API запишет намерение (`desired_status=active`), а сервис `stream_manager` поднимет Frame Producer subprocess'ом.
 
 Пайплайн: Producer → Kafka (`raw_frames`) → YOLO Consumer → Kafka (`detections`) → Detection Consumer → PostgreSQL.
+
+<p align="center"><img src="demos/detection-gallery.png" alt="📋 Галерея детекций стрима: кропы объектов с классом и уверенностью"><br><em>📋 Галерея детекций на странице Стримы — кропы объектов с классом и уверенностью.</em></p>
 
 > 📡 **Публичные камеры без MediaMTX.** Producer открывает и HLS-ссылки
 > (`https://.../playlist.m3u8`) напрямую — вставь такой URL веб-камеры прямо
@@ -208,6 +222,8 @@ pre-commit install
 - Хуки живут в `.pre-commit-config.yaml`; версии синхронизированы с CI
 
 ## API Endpoints
+
+<p align="center"><img src="demos/swagger.png" alt="Swagger UI: все эндпоинты API" width="760"></p>
 
 ### Видео
 

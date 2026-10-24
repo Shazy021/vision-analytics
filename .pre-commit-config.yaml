@@ -26,6 +26,7 @@ repos:
       - id: check-merge-conflict      # незачищенные conflict-маркеры
       - id: detect-private-key        # приватные ключи не пройдут в git
       - id: check-added-large-files   # защита от случайных .pt / .mp4 в коммите
+        exclude: ^demos/              # демо-ассеты (гифки/скрины) хранятся специально там
 
   # --- Ruff: тот же линтер и та же версия, что в CI --------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
