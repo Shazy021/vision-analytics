@@ -304,9 +304,9 @@ Dockerfile                      # CUDA image (video-consumer, yolo-consumer)
 Dockerfile.cpu                  # CPU image (api, detection-consumer, stream-manager, dashboard)
 Makefile                        # make up / make down / make test / make lint
 pyproject.toml                  # pytest, ruff, alembic config
-requirements.txt                # Full deps (torch, ultralytics, cv2, ...)
-requirements.cpu.txt            # CPU-only deps (no torch)
-requirements-dev.txt            # pytest, ruff, pre-commit
+pyproject.toml                  # Deps (PEP 621): base + extras gpu/dash/dev;
+                                #   CPU image: ".[dash]", CUDA image: ".[gpu]",
+                                #   CI: ".[gpu,dev]", local: -e ".[gpu,dash,dev]"
 ```
 
 ---

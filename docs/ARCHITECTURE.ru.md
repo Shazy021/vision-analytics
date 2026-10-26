@@ -302,9 +302,9 @@ Dockerfile                      # CUDA образ (video-consumer, yolo-consumer
 Dockerfile.cpu                  # CPU образ (api, detection-consumer, stream-manager, dashboard)
 Makefile                        # make up / make down / make test / make lint
 pyproject.toml                  # Конфигурация pytest, ruff, alembic
-requirements.txt                # Полный набор зависимостей (torch, ultralytics, cv2, ...)
-requirements.cpu.txt            # Зависимости только для CPU (без torch)
-requirements-dev.txt            # pytest, ruff, pre-commit
+pyproject.toml                  # Зависимости (PEP 621): база + extras gpu/dash/dev;
+                                #   CPU-образ: ".[dash]", CUDA-образ: ".[gpu]",
+                                #   CI: ".[gpu,dev]", локалка: -e ".[gpu,dash,dev]"
 ```
 
 ---

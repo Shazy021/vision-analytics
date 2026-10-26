@@ -26,7 +26,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dev tools
-        run: pip install -r requirements-dev.txt
+        run: pip install ".[dev]"
 
       - name: Ruff check
         run: ruff check app dashboard tests
@@ -47,7 +47,7 @@ jobs:
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install ".[gpu,dev]"
 
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short

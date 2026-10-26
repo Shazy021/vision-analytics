@@ -1,3 +1,83 @@
+# ============================================================
+# Единый источник зависимостей проекта (PEP 621).
+#
+# Кто что устанавливает:
+#   CPU-образ (api, dashboard, detection-consumer, stream-manager):
+#       pip install ".[dash]"
+#   CUDA-образ (video-consumer, yolo-consumer):
+#       pip install ".[gpu]"          (torch ставится ОТДЕЛЬНО с индекса
+#                                      download.pytorch.org/whl/cuXXX —
+#                                      индекс не зашивается в PEP 508)
+#   CI:  torch-cpu + pip install ".[gpu,dev]"
+#   Локалка: pip install -e ".[gpu,dash,dev]"
+#
+# Extras:
+#   gpu  — инференс (ultralytics; torch уже установлен из индекса)
+#   dash — дашборд (streamlit/plotly/matplotlib/Pillow)
+#   dev  — тесты и инструменты разработки (в образы НЕ попадают)
+#
+# name — обязательное поле PEP 621 (без него pip не соберёт пакет);
+# version сознательно не указан — проект не публикуется.
+# ============================================================
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vision-analytics-platform"
+# name и version — обязательные поля PEP 621 (setuptools отказывается
+# собирать пакет без них). Проект не публикуется, версия инертна.
+version = "0.1.0"
+requires-python = ">=3.12"
+
+# --- Базовые зависимости: общее ядро, нужное ЛЮБОМУ образу ---
+dependencies = [
+    # API
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.30.0",
+    "pydantic==2.9.0",
+    "pydantic-settings==2.5.0",
+    "python-multipart==0.0.9",
+    # База данных
+    "sqlalchemy==2.0.35",
+    "psycopg2-binary==2.9.9",
+    "alembic==1.13.2",
+    # Кадры/стримы (producer как subprocess в api читает кадры через cv2)
+    # 4.13.0.92, НЕ 4.10.0.82/4.13.0.90: 4.10.x — колёса под ABI NumPy 1.x
+    # (падают с numpy 2.x), 4.13.0.90 — тянет системный libxcb.so.1 (нет в
+    # slim-образах), 4.13.0.92 — обе проблемы починены
+    "opencv-python-headless==4.13.0.92",
+    # Kafka / S3
+    "confluent-kafka==2.4.0",
+    "minio==7.2.15",
+]
+
+[project.optional-dependencies]
+# Инференс: ultralytics тянет torch как зависимость — в CUDA-образе и CI
+# torch уже установлен с нужного индекса (cuXXX/cpu), pip его не тронет.
+gpu = [
+    "ultralytics==8.4.115",
+]
+# Дашборд: streamlit + отрисовка боксов поверх кадров в превью
+dash = [
+    "streamlit==1.38.0",
+    "plotly==5.24.0",
+    "requests==2.32.3",
+    "matplotlib==3.9.2",
+    "Pillow==10.4.0",
+]
+# Разработка: версии синхронизированы с .pre-commit-config.yaml и CI
+dev = [
+    "pytest==8.3.0",
+    "pytest-asyncio==0.24.0",
+    "httpx==0.27.0",
+    "ruff==0.16.10",
+    "pre-commit==4.6.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [tool.pytest.ini_options]
 # Автоматически распознавать async-тесты без @pytest.mark.asyncio
 asyncio_mode = "auto"

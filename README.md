@@ -163,8 +163,8 @@ ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transp
 ### Локально (без Docker)
 
 ```bash
-# Установить зависимости
-pip install -r requirements.txt
+# Установить зависимости (все extras: инференс + дашборд + dev-инструменты)
+pip install -e ".[gpu,dash,dev]"
 
 # Запустить PostgreSQL, Kafka
 # Обновить DATABASE_URL, KAFKA_BOOTSTRAP_SERVERS
@@ -205,7 +205,7 @@ ruff check app dashboard tests
 защита от крупных файлов и приватных ключей) на каждый `git commit`. Установка — один раз:
 
 ```bash
-pip install -r requirements-dev.txt
+pip install ".[dev]"
 pre-commit install
 ```
 
@@ -293,8 +293,7 @@ Kafka — транспорт, не хранилище. Все детекции �
 ├── docker-compose.yml       # 12 services (kafka-init — разовый)
 ├── Dockerfile               # CUDA-образ: video-consumer, yolo-consumer (инференс)
 ├── Dockerfile.cpu           # CPU-образ: api, detection-consumer, stream-manager, dashboard
-├── requirements.txt         # зависимости CUDA-образа (torch/ultralytics)
-└── requirements.cpu.txt     # зависимости CPU-образа (без torch)
+└── pyproject.toml           # зависимости (PEP 621): база + extras gpu/dash/dev
 ```
 
 ## Требования

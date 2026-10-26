@@ -2,7 +2,7 @@
 # Pre-commit — автопроверки перед каждым git commit.
 #
 # Установка (один раз после клонирования репозитория):
-#   pip install -r requirements-dev.txt
+#   pip install ".[dev]"
 #   pre-commit install
 #
 # Разовый прогон по всем файлам:
