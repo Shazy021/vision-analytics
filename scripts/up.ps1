@@ -34,7 +34,7 @@ switch ($Action) {
     "up" {
         docker compose $files up -d
         Write-Host ""
-        Write-Host "Dashboard: http://localhost:8501 | Swagger: http://localhost:8000/docs | Flower: http://localhost:5555"
+        Write-Host "Dashboard: http://localhost:8501 | Swagger: http://localhost:8000/docs"
     }
     "down" { docker compose $files down }
     "logs" { docker compose $files logs -f }

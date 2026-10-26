@@ -21,7 +21,6 @@ class Video(Base):
 
     # Статус обработки: processing -> completed / partial / failed
     status = Column(String(20), nullable=False, default="processing")
-    task_id = Column(String(255), nullable=True)  # ID Celery-задачи
 
     # Прогресс обработки: факт, который пишет worker по ходу дела,
     # читает дашборд. Тот же принцип, что у desired/status у стримов:

@@ -5,7 +5,7 @@
 Приоритет: os.environ (Docker, CI) > .env.local > .env > дефолты из класса.
 
 Благодаря этому в проекте один источник правды о конфиге:
-- API, Celery-воркеры, Kafka-консьюмеры и тесты читают один и тот же Settings
+- API, Kafka-консьюмеры и тесты читают один и тот же Settings
 - docker-compose передаёт значения через переменные окружения
 - локально достаточно файла .env (см. .env.example)
 """
@@ -45,10 +45,6 @@ class Settings(BaseSettings):
     device: str = "auto"  # auto | cpu | cuda | 0 | 1 — "auto" резолвится при старте
     extract_fps: int = 5
     max_frames: int = 300  # 0 = без лимита, иначе обработать только N кадров
-
-    # --- Celery ---
-    celery_broker_url: str = "redis://localhost:6379/0"
-    celery_result_backend: str = "redis://localhost:6379/1"
 
     # --- Kafka ---
     kafka_bootstrap_servers: str = "localhost:9092"

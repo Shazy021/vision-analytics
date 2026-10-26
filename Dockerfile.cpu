@@ -1,8 +1,8 @@
 # ============================================================
-# CPU-образ: api, flower, detection-consumer, dashboard.
+# CPU-образ: api, detection-consumer, stream-manager, dashboard.
 #
 # Отличие от Dockerfile: без torch/ultralytics — инференс нужен
-# только worker и yolo-consumer, они собираются из Dockerfile (CUDA).
+# только video-consumer и yolo-consumer, они собираются из Dockerfile (CUDA).
 # Так 4 из 6 сервисов занимают ~2 GB вместо 10.6 GB каждый,
 # а их пересборка занимает минуты, а не час.
 # ============================================================

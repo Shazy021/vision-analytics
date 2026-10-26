@@ -1,4 +1,4 @@
-# CPU-образ (Dockerfile.cpu): api, flower, detection-consumer, dashboard.
+# CPU-образ (Dockerfile.cpu): api, detection-consumer, stream-manager, dashboard.
 #
 # Отличие от requirements.txt: БЕЗ torch/ultralytics — GPU-инференс нужен
 # только worker и yolo-consumer, они собираются из Dockerfile (CUDA).
@@ -37,9 +37,6 @@ requests==2.32.3
 matplotlib==3.9.2
 Pillow==10.4.0
 
-# --- Celery / Kafka / S3 ---
-celery==5.4.0
-redis==5.2.0
-flower==2.0.1
+# --- Kafka / S3 ---
 confluent-kafka==2.4.0
 minio==7.2.15
