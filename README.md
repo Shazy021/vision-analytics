@@ -20,8 +20,7 @@
 - **CV**: Ultralytics YOLOv8, OpenCV
 - **БД**: PostgreSQL, Alembic (миграции)
 - **Дашборд**: Streamlit, Plotly
-- **Задачи**: Celery, Redis
-- **Стриминг**: Kafka (KRaft), confluent-kafka
+- **Очереди/события**: Kafka (KRaft), confluent-kafka
 - **RTSP**: MediaMTX
 - **Инфра**: Docker Compose, GPU passthrough, pytest
 
@@ -37,7 +36,7 @@ cp .env.example .env
 docker-compose up -d
 ```
 
-Поднимутся 13 сервисов (14 контейнеров с учётом worker ×2): db, redis, minio, kafka, kafka-init (разовый — создаёт топики), api, worker (x2), flower, dashboard, stream-manager, yolo-consumer, detection-consumer, mediamtx.
+Поднимутся 12 сервисов (13 контейнеров с учётом video-consumer ×2): db, minio, kafka, kafka-init (разовый — создаёт топики), api, dashboard, stream-manager, video-consumer (x2), yolo-consumer, detection-consumer, mediamtx.
 
 <p align="center"><img src="demos/docker-compose-ps.png" alt="Docker Desktop: все сервисы стека подняты"><br><em><code>kafka-init</code> в сером статусе — это норма: разовый контейнер создал топики и штатно завершился.</em></p>
 
@@ -85,7 +84,6 @@ docker-compose up -d
 | API | http://localhost:8000 |
 | Swagger | http://localhost:8000/docs |
 | Dashboard | http://localhost:8501 |
-| Flower (Celery) | http://localhost:5555 |
 
 ### Загрузка видео
 
@@ -96,7 +94,7 @@ curl -X POST http://localhost:8000/api/videos/upload \
   -F "file=@video.mp4"
 ```
 
-Видео обработается автоматически: Celery Worker → YOLO → PostgreSQL.
+Видео обработается автоматически: Kafka (`video_requests`) → video-consumer → YOLO → PostgreSQL.
 Готовое видео доступно в дашборде: **синхронный двойной плеер** — чистый кадр
 и кадр с боксами бок-о-бок на одном общем таймлайне.
 
@@ -168,8 +166,8 @@ ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transp
 # Установить зависимости
 pip install -r requirements.txt
 
-# Запустить PostgreSQL, Redis, Kafka
-# Обновить DATABASE_URL, CELERY_BROKER_URL, KAFKA_BOOTSTRAP_SERVERS
+# Запустить PostgreSQL, Kafka
+# Обновить DATABASE_URL, KAFKA_BOOTSTRAP_SERVERS
 
 # Миграции
 alembic upgrade head
@@ -180,23 +178,17 @@ uvicorn app.main:app --reload
 # Dashboard
 streamlit run dashboard/app.py
 
-# Celery Worker
-# --pool=solo: CUDA-контекст не переживает fork(), а prefork-пул Celery
-# форкает процессы (RuntimeError "Cannot re-initialize CUDA in forked
-# subprocess"). solo выполняет задачи в главном процессе — для GPU это
-# правильный дефолт.
-celery -A app.core.celery_app worker --loglevel=info --pool=solo -Q processing
-
 # Kafka Consumers
-python -m app.streaming.yolo_consumer yolov8n.pt   # устройство — из DEVICE (auto → cpu без GPU)
-python -m app.streaming.consumer
+python -m app.consumers.video             # видео: video_requests → YOLO → БД
+python -m app.consumers.yolo_frames yolov8n.pt   # стримы: raw_frames → YOLO → detections (устройство — из DEVICE, auto → cpu без GPU)
+python -m app.consumers.detections
 ```
 
 ### Тесты и линтер
 
 ```bash
 # Тесты — полностью герметичны и не требуют Docker: sqlite in-memory,
-# сеть не трогается (MinIO/Kafka замоканы в conftest), eager-Celery,
+# сеть не трогается (MinIO/Kafka замоканы в conftest),
 # тестовое видео генерируется на месте. Весь сьют — несколько секунд.
 pytest tests/ -v
 
@@ -264,7 +256,6 @@ pre-commit install
 | Сервис | Адрес внутри Docker | Адрес с хоста |
 |--------|-------------------|---------------|
 | PostgreSQL | `db:5432` | `localhost:5432` |
-| Redis | `redis:6379` | `localhost:6379` |
 | Kafka | `kafka:29092` | `localhost:9092` |
 | MediaMTX | `mediamtx:8554` | `localhost:8554` |
 | FastAPI | `api:8000` | `localhost:8000` |
@@ -276,6 +267,7 @@ pre-commit install
 |-------|-----------|----------|
 | `raw_frames` | 1 час | Кадры от Producer (base64 JPEG) |
 | `detections` | 24 часа | YOLO-детекции (JSON) |
+| `video_requests` | 24 часа | Задачи на обработку загруженных видео (JSON) |
 
 Kafka — транспорт, не хранилище. Все детекции сохраняются в PostgreSQL.
 
@@ -284,23 +276,23 @@ Kafka — транспорт, не хранилище. Все детекции �
 ```
 ├── app/
 │   ├── api/routes/          # API endpoints (videos, streams, analytics)
-│   ├── core/                # Config, database, celery
+│   ├── core/                # Config, database, storage, Kafka topics, CUDA utils
 │   ├── db/models.py         # SQLAlchemy models (Video, Stream, Detection)
 │   ├── schemas/             # Pydantic schemas
-│   ├── services/            # Celery tasks (video processing)
-│   ├── streaming/           # Kafka pipeline
-│   │   ├── topics.py        # Kafka config
-│   │   ├── producer.py      # RTSP/video → Kafka
-│   │   ├── yolo_consumer.py # Kafka → YOLO → Kafka
-│   │   └── consumer.py      # Kafka → PostgreSQL
+│   ├── processing/          # Обработка видео: processor, detector, extractor
+│   ├── streams/             # Стримы: reconciler (manager) + FrameProducer
+│   ├── consumers/           # Kafka-консьюмеры (модуль = контейнер)
+│   │   ├── video.py         # video_requests → processor → БД
+│   │   ├── yolo_frames.py   # raw_frames → YOLO → detections + MinIO
+│   │   └── detections.py    # detections → PostgreSQL
 │   └── main.py              # FastAPI entry point
 ├── dashboard/
 │   └── app.py               # Streamlit dashboard
 ├── alembic/                 # Database migrations
 ├── tests/                   # Test suite
-├── docker-compose.yml       # 13 services (kafka-init — разовый)
-├── Dockerfile               # CUDA-образ: worker, yolo-consumer (инференс)
-├── Dockerfile.cpu           # CPU-образ: api, flower, detection-consumer, dashboard
+├── docker-compose.yml       # 12 services (kafka-init — разовый)
+├── Dockerfile               # CUDA-образ: video-consumer, yolo-consumer (инференс)
+├── Dockerfile.cpu           # CPU-образ: api, detection-consumer, stream-manager, dashboard
 ├── requirements.txt         # зависимости CUDA-образа (torch/ultralytics)
 └── requirements.cpu.txt     # зависимости CPU-образа (без torch)
 ```

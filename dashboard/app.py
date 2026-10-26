@@ -1354,10 +1354,10 @@ elif page == "📡 Стримы":
             "# Топики Kafka (создаются сервисом kafka-init):\n"
             "docker compose exec kafka kafka-topics --bootstrap-server kafka:29092 --list\n\n"
             "# Ручной запуск producer (адрес — с точки зрения КОНТЕЙНЕРА!):\n"
-            "docker compose exec stream-manager python -m app.streaming.producer "
+            "docker compose exec stream-manager python -m app.streams.producer "
             "rtsp://mediamtx:8554/mystream 5 1\n\n"
             "# Тест без камеры: положи .mp4 в ./uploads — в контейнере это /app/uploads/…\n"
-            "docker compose exec stream-manager python -m app.streaming.producer "
+            "docker compose exec stream-manager python -m app.streams.producer "
             "/app/uploads/demo.mp4 5 1",
             language="bash",
         )

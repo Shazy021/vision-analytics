@@ -6,10 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.consumers.yolo_frames import YOLOConsumer
 from app.core.database import Base
 from app.db.models import Stream
-from app.streaming.manager import MAX_FAST_CRASHES, StreamManager
-from app.streaming.yolo_consumer import YOLOConsumer
+from app.streams.manager import MAX_FAST_CRASHES, StreamManager
 
 # ---- Тесты FrameProducer ----
 
@@ -19,12 +19,12 @@ class TestFrameProducer:
     def test_message_format(self):
         """Проверяем что сообщение имеет правильную структуру"""
         # Мокаем Kafka Producer
-        with patch("app.streaming.producer.Producer") as mock_producer_cls:
+        with patch("app.streams.producer.Producer") as mock_producer_cls:
             mock_producer = MagicMock()
             mock_producer_cls.return_value = mock_producer
 
             from app.core.config import settings
-            from app.streaming.producer import FrameProducer
+            from app.streams.producer import FrameProducer
             FrameProducer("test.mp4", fps=2)
 
             # Проверяем что Producer создан с правильными параметрами.
@@ -99,7 +99,7 @@ class TestYOLOConsumer:
         fake_poll.called = False
         consumer.consumer.poll.side_effect = fake_poll
 
-        with patch("app.streaming.yolo_consumer.cv2.imdecode", return_value=MagicMock()):
+        with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
             with pytest.raises(SystemExit) as exc_info:
                 consumer.run()
         assert exc_info.value.code == 1
@@ -125,13 +125,13 @@ class TestYOLOConsumer:
 class TestDetectionConsumer:
     """Тесты сохранения детекций в БД"""
 
-    @patch("app.streaming.consumer.SessionLocal")
+    @patch("app.consumers.detections.SessionLocal")
     def test_save_to_db_creates_detection_objects(self, mock_session_cls):
         """Проверяем что _save_to_db создаёт правильные Detection объекты"""
         mock_db = MagicMock()
         mock_session_cls.return_value = mock_db
 
-        from app.streaming.consumer import DetectionConsumer
+        from app.consumers.detections import DetectionConsumer
         consumer = DetectionConsumer.__new__(DetectionConsumer)
 
         detection = {
@@ -144,7 +144,7 @@ class TestDetectionConsumer:
             ],
         }
 
-        with patch("app.streaming.consumer.Detection") as mock_detection_cls:
+        with patch("app.consumers.detections.Detection") as mock_detection_cls:
             consumer._save_to_db(detection)
 
             # Проверяем что Detection создан с правильными параметрами
@@ -163,14 +163,14 @@ class TestDetectionConsumer:
             mock_db.commit.assert_called_once()
             mock_db.close.assert_called_once()
 
-    @patch("app.streaming.consumer.SessionLocal")
+    @patch("app.consumers.detections.SessionLocal")
     def test_save_to_db_rollback_on_error(self, mock_session_cls):
         """Проверяем что при ошибке делается rollback"""
         mock_db = MagicMock()
         mock_db.add.side_effect = Exception("DB error")
         mock_session_cls.return_value = mock_db
 
-        from app.streaming.consumer import DetectionConsumer
+        from app.consumers.detections import DetectionConsumer
         consumer = DetectionConsumer.__new__(DetectionConsumer)
 
         detection = {
@@ -180,7 +180,7 @@ class TestDetectionConsumer:
             "objects": [{"class": "person", "confidence": 0.95, "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}}],
         }
 
-        with patch("app.streaming.consumer.Detection"):
+        with patch("app.consumers.detections.Detection"):
             consumer._save_to_db(detection)
 
             mock_db.rollback.assert_called_once()
@@ -194,14 +194,14 @@ class TestTopics:
 
     def test_topic_names(self):
         """Проверяем имена топиков"""
-        from app.streaming.topics import TOPIC_DETECTIONS, TOPIC_RAW_FRAMES
+        from app.core.topics import TOPIC_DETECTIONS, TOPIC_RAW_FRAMES
         assert TOPIC_RAW_FRAMES == "raw_frames"
         assert TOPIC_DETECTIONS == "detections"
 
     def test_bootstrap_servers(self):
         """Адрес Kafka приходит из настроек (KAFKA_BOOTSTRAP_SERVERS в .env/compose)"""
         from app.core.config import settings
-        from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS
+        from app.core.topics import KAFKA_BOOTSTRAP_SERVERS
         assert KAFKA_BOOTSTRAP_SERVERS == settings.kafka_bootstrap_servers
 
 
@@ -274,7 +274,7 @@ class TestStreamManager:
         """Пережив порог здоровья, живой producer получает status=active."""
         import time as _time
 
-        from app.streaming.manager import HEALTHY_THRESHOLD
+        from app.streams.manager import HEALTHY_THRESHOLD
         db, _, stream, spawned, mgr = self._fresh()
         mgr.reconcile_once(db)
         assert db.get(Stream, stream.id).status == "starting"
@@ -372,7 +372,7 @@ class TestStreamManager:
         """
         import time as _time
 
-        from app.streaming.manager import EXIT_OPEN_FAILED, HEALTHY_THRESHOLD
+        from app.streams.manager import EXIT_OPEN_FAILED, HEALTHY_THRESHOLD
         db, _, stream, spawned, mgr = self._fresh()
 
         def open_fail_spawn(rtsp, fps, sid):

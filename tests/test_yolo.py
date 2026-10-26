@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from app.detection.yolo import YOLODetector
+from app.processing.detector import YOLODetector
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def mock_model():
 
 def test_detect_returns_detections(mock_model):
     """detect конвертирует результат YOLO в наш формат."""
-    with patch("app.detection.yolo.YOLO", return_value=mock_model):
+    with patch("app.processing.detector.YOLO", return_value=mock_model):
         detector = YOLODetector(weights_path="fake.pt", device="cpu")
         detector.model = mock_model
 
@@ -67,7 +67,7 @@ def test_detect_empty_result(mock_model):
     empty_result.boxes = None
     mock_model.return_value = [empty_result]
 
-    with patch("app.detection.yolo.YOLO", return_value=mock_model):
+    with patch("app.processing.detector.YOLO", return_value=mock_model):
         detector = YOLODetector(weights_path="fake.pt", device="cpu")
         detector.model = mock_model
 

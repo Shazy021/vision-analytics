@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.db.models import Stream
-from app.streaming.producer import EXIT_OPEN_FAILED
+from app.streams.producer import EXIT_OPEN_FAILED
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def default_spawn(rtsp_url: str, fps: int, stream_id: int) -> subprocess.Popen:
     """
     return subprocess.Popen(
         [
-            sys.executable, "-m", "app.streaming.producer",
+            sys.executable, "-m", "app.streams.producer",
             rtsp_url, str(fps), str(stream_id),
         ],
     )
