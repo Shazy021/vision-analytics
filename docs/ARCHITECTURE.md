@@ -36,24 +36,24 @@ FastAPI: upload_video()
 1. Create Video row in DB (status: "processing")
 2. Save file to temp disk -> upload to MinIO via fput_object (multipart)
 3. Delete temp file
-4. Send Celery task: process_video_task.delay(video_id)
+4. Publish task to Kafka: topic video_requests, value {"video_id": id}
 5. Return 201 immediately (client polls /api/videos/{id}/status)
 ```
 
 ---
 
-### 3. Video Processing (Celery Worker)
+### 3. Video Processing (video_consumer)
 
 ```
-process_video_task(video_id)
+VideoConsumer: poll video_requests -> {"video_id": id}
     |
-app.pipeline.processor.process_video()
+app.processing.processor.process_video()
     |
 - Reads video DIRECTLY from MinIO via HTTP (OpenCV + FFmpeg streaming)
 - Does NOT download to disk
     |
 - YOLO detection every Nth frame (controlled by settings.extract_fps)
-- app.detection.yolo.YOLODetector.detect()
+- app.processing.detector.YOLODetector.detect()
     |
 - Creates Detection rows in DB:
   frame_index, timestamp, class_name, bbox, confidence
@@ -65,12 +65,19 @@ app.pipeline.processor.process_video()
 Note: the video file is already in MinIO from step 2. The processor does NOT
 re-upload it. It reads via presigned URL.
 
+Delivery semantics: at-least-once. The consumer commits the Kafka offset only
+after processing finishes, so a crash mid-video redelivers the task;
+process_video() is idempotent (it deletes the video's detections first).
+Permanent failures are marked `failed` in the DB and the offset is committed,
+so a corrupt file cannot wedge the queue. Sticky CUDA errors exit without a
+commit — the container restarts and the task is retried in a fresh context.
+
 ---
 
 ### 4. Streams (Kafka Pipeline)
 
 ```
-RTSP URL -> app.streaming.producer.FrameProducer (subprocess, spawned by stream_manager)
+RTSP URL -> app.streams.producer.FrameProducer (subprocess, spawned by stream_manager)
     |
 Reads RTSP via OpenCV.VideoCapture (forced TCP transport in Docker)
     |
@@ -78,7 +85,7 @@ Every Nth frame:
   - Encode JPEG + base64
   - Publish to Kafka topic "raw_frames"
         |
-        +--> app.streaming.yolo_consumer.YOLOConsumer
+        +--> app.consumers.yolo_frames.YOLOConsumer
         |      - Decode frame, run YOLO inference
         |      - Save frames WITH detections to MinIO: streams/{stream_id}/{index}.jpg
         |      - Publish detections to Kafka topic "detections"
@@ -87,7 +94,7 @@ Every Nth frame:
 
 Kafka topic "detections"
         |
-        +--> app.streaming.consumer.DetectionConsumer
+        +--> app.consumers.detections.DetectionConsumer
                - Read detections from Kafka
                - Write Detection rows to PostgreSQL (with stream_id)
 ```
@@ -100,7 +107,7 @@ Stream lifecycle (desired-state + reconciler pattern):
 
 The API is only an "intent writer": it records `desired_status` in the DB. The
 actual producer processes are owned by a separate service, `stream_manager`
-(`app/streaming/manager.py`) — see the "Stream supervision" section below.
+(`app/streams/manager.py`) — see the "Stream supervision" section below.
 
 Frame numbering (`frame_index`) is continuous: on start, the producer resumes
 counting from `max(frame_index)` in the DB (`FrameProducer._initial_frame_index()`).
@@ -215,7 +222,6 @@ Three PostgreSQL tables (`app/db/models.py`), versioned with Alembic.
 | `resolution` | varchar(20) | e.g. `1920x1080` |
 | `uploaded_at` | datetime | server default `now()` |
 | `status` | varchar(20) | `processing` → `completed` / `partial` / `failed` |
-| `task_id` | varchar(255) | Celery task id |
 
 ### `detections`
 | Column | Type | Notes |
@@ -254,15 +260,21 @@ the observed fact. Both live in the DB, so they survive an API or manager restar
 
 ## Project Structure
 
+Packages mirror runtime units: one compose service = one entry-point package;
+shared code lives in `core/`, `db/`, `schemas/`.
+
 ```
 app/
 ├── main.py                     # FastAPI app, lifespan, router registration
-├── core/
-│   ├── config.py               # pydantic-settings: DB, Kafka, S3, YOLO, Celery
+├── core/                       # shared kernel
+│   ├── config.py               # pydantic-settings: DB, Kafka, S3, YOLO
+│   ├── cuda.py                 # sticky CUDA error classification (consumers)
 │   ├── database.py             # SQLAlchemy engine, SessionLocal, Base, get_db
-│   ├── celery_app.py           # Celery app (broker=Redis, backend=Redis)
-│   └── storage.py              # MinIO client: upload, download, presigned, TTL
-├── api/
+│   ├── storage.py              # MinIO client: upload, download, presigned, TTL
+│   └── topics.py               # Kafka topic names, bootstrap servers
+├── db/
+│   └── models.py               # SQLAlchemy: Video, Detection, Stream
+├── api/                        # compose service: api
 │   └── routes/
 │       ├── videos.py           # CRUD: upload, list, get, status, frame, delete
 │       ├── streams.py          # CRUD: create, start, stop, delete, detections, frames
@@ -270,30 +282,26 @@ app/
 ├── schemas/
 │   ├── video.py                # VideoBase, VideoCreate, VideoRead (Pydantic v2)
 │   └── detection.py            # DetectionBase, DetectionRead
-├── detection/
-│   └── yolo.py                 # YOLODetector wrapper (Ultralytics YOLOv8)
-├── pipeline/
-│   └── processor.py            # process_video(): read MinIO -> YOLO -> DB
-├── video/
+├── processing/                 # video processing domain (used by consumers/video)
+│   ├── processor.py            # process_video(): read MinIO -> YOLO -> DB
+│   ├── detector.py             # YOLODetector wrapper (Ultralytics YOLOv8)
 │   └── extractor.py            # VideoCapture context manager, Frame dataclass
-├── streaming/
-│   ├── topics.py               # Kafka topic names, bootstrap servers
-│   ├── producer.py             # FrameProducer: RTSP/file -> Kafka raw_frames
-│   ├── yolo_consumer.py        # YOLOConsumer: raw_frames -> YOLO -> detections + MinIO
-│   └── consumer.py             # DetectionConsumer: detections -> PostgreSQL
-├── tasks/
-│   └── processing.py           # Celery task: process_video_task
-└── db/
-    └── models.py               # SQLAlchemy: Video, Detection, Stream
+├── streams/                    # compose service: stream-manager
+│   ├── manager.py              # reconciler: desired-state loop over producers
+│   └── producer.py             # FrameProducer: RTSP/file -> Kafka raw_frames
+└── consumers/                  # Kafka consumer services (one module per container)
+    ├── video.py                # VideoConsumer: video_requests -> process_video -> DB
+    ├── yolo_frames.py          # raw_frames -> YOLO -> detections + MinIO
+    └── detections.py           # DetectionConsumer: detections -> PostgreSQL
 
 alembic/                        # DB migrations (alembic upgrade head)
-tests/                          # pytest: API, Celery, YOLO, extractor, streaming
+tests/                          # pytest: API, YOLO, extractor, streams, consumers
 dashboard/                      # Streamlit app
 .github/workflows/              # CI (lint + test), Docker build
 docker-compose.yml              # All services (CPU mode)
 docker-compose.gpu.yml          # GPU overrides (NVIDIA)
-Dockerfile                      # CUDA image (worker, yolo-consumer)
-Dockerfile.cpu                  # CPU image (api, flower, detection-consumer, dashboard)
+Dockerfile                      # CUDA image (video-consumer, yolo-consumer)
+Dockerfile.cpu                  # CPU image (api, detection-consumer, stream-manager, dashboard)
 Makefile                        # make up / make down / make test / make lint
 pyproject.toml                  # pytest, ruff, alembic config
 requirements.txt                # Full deps (torch, ultralytics, cv2, ...)
@@ -311,10 +319,10 @@ requirements-dev.txt            # pytest, ruff, pre-commit
 Client -> POST /api/videos/upload
     |
     v
-FastAPI: create Video row -> upload file to MinIO -> dispatch Celery task
+FastAPI: create Video row -> upload file to MinIO -> publish to Kafka "video_requests"
     |
     v
-Celery Worker: process_video()
+VideoConsumer: process_video()
     |  read video from MinIO via HTTP (presigned URL)
     |  YOLO detect every Nth frame
     |  write Detection rows to PostgreSQL
@@ -352,8 +360,7 @@ Dashboard: GET /api/streams/{id}/detections + /api/analytics/stream-activity
 | Database | PostgreSQL 16 (SQLAlchemy ORM) |
 | Migrations | Alembic |
 | Object Storage | MinIO (S3-compatible) |
-| Message Queue | Kafka (KRaft mode, no ZooKeeper) |
-| Async Tasks | Celery + Redis (broker + result backend) |
+| Message Queue / Task Queue | Kafka (KRaft mode, no ZooKeeper) — events AND video tasks |
 | ML | Ultralytics YOLOv8 |
 | Media | OpenCV + FFmpeg |
 | Dashboard | Streamlit + Plotly |
@@ -368,21 +375,19 @@ Two images to minimize GPU memory usage:
 
 | Image | Dockerfile | Services | Contents |
 |-------|-----------|----------|----------|
-| `vap-cpu` | `Dockerfile.cpu` | api, flower, detection-consumer, dashboard | No torch (~2 GB) |
-| `vap-cuda` | `Dockerfile` | worker, yolo-consumer | torch + CUDA (~10-11 GB) |
+| `vap-cpu` | `Dockerfile.cpu` | api, detection-consumer, stream-manager, dashboard | No torch (~2 GB) |
+| `vap-cuda` | `Dockerfile` | video-consumer, yolo-consumer | torch + CUDA (~10-11 GB) |
 
 Services in `docker-compose.yml`:
 
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
 | `db` | postgres:16-alpine | 5432 | Database |
-| `redis` | redis:7-alpine | 6379 | Celery broker + backend |
 | `api` | vap-cpu | 8000 | FastAPI server |
-| `worker` | vap-cuda | — | Celery worker (replicas: 2, pool: solo) |
-| `flower` | vap-cpu | 5555 | Celery monitoring UI |
 | `dashboard` | vap-cpu | 8501 | Streamlit dashboard |
 | `kafka` | cp-kafka:7.6.0 | 9092 | Kafka broker (KRaft) |
 | `kafka-init` | cp-kafka:7.6.0 | — | One-shot: create topics |
+| `video-consumer` | vap-cuda | — | video_requests -> process_video -> DB (replicas: 2) |
 | `yolo-consumer` | vap-cuda | — | Kafka -> YOLO -> detections |
 | `detection-consumer` | vap-cpu | — | Kafka -> PostgreSQL |
 | `stream-manager` | vap-cpu | — | Reconciler: owns producer subprocesses |
@@ -391,15 +396,17 @@ Services in `docker-compose.yml`:
 
 GPU: use `docker-compose.gpu.yml` override or `make up` (auto-detects via `nvidia-smi`).
 
-Celery workers use `--pool=solo` because CUDA context does not survive `fork()`.
-Parallelism via `deploy.replicas: 2` (independent containers).
+CUDA context does not survive `fork()`, so each consumer container runs
+inference in its main process; parallelism via `deploy.replicas: 2`
+(independent containers, Kafka distributes `video_requests` partitions
+between them).
 
 ---
 
 ## Implementation Details
 
 ### Why read video from MinIO via HTTP?
-- Celery workers run in separate containers — no shared filesystem
+- Consumers run in separate containers — no shared filesystem
 - OpenCV (FFmpeg backend) supports `http://` sources natively
 - Avoids downloading 7 GB files to worker disk
 
@@ -439,7 +446,7 @@ Parallelism via `deploy.replicas: 2` (independent containers).
 - GPU processes batches more efficiently than single frames
   (`detect_batch()` exists in code but is not yet wired into the pipeline)
 - Kafka `message.max.bytes`: 5 MB (JPEG frames in base64)
-- Kafka retention: `raw_frames` = 1 hour, `detections` = 24 hours
+- Kafka retention: `raw_frames` = 1 hour, `detections` = 24 hours, `video_requests` = 24 hours
 - MinIO upload: `fput_object` (multipart) for videos, `put_object` for frames
 
 ---
@@ -476,7 +483,6 @@ curl "http://localhost:8000/api/analytics/class-distribution?video_id=1"
 4. Verify health: `curl http://localhost:8000/health`
 5. Open dashboard: http://localhost:8501
 6. Open MinIO console: http://localhost:9001 (minioadmin / minioadmin123)
-7. Open Flower: http://localhost:5555
 
 The dashboard video player reaches MinIO directly from the browser — make sure
 `S3_PUBLIC_ENDPOINT` (default `http://localhost:9000`) is reachable from the
@@ -489,11 +495,11 @@ machine where the dashboard is opened.
 | Concern | File |
 |---------|------|
 | App entry | `app/main.py` |
-| Celery tasks | `app/tasks/processing.py` |
-| YOLO detection | `app/detection/yolo.py` |
-| Video pipeline | `app/pipeline/processor.py` |
+| Video task consumer | `app/consumers/video.py` |
+| YOLO detection | `app/processing/detector.py` |
+| Video pipeline | `app/processing/processor.py` |
 | MinIO storage | `app/core/storage.py` |
 | DB models | `app/db/models.py` |
 | Config / env vars | `app/core/config.py` |
-| Kafka topics | `app/streaming/topics.py` |
+| Kafka topics | `app/core/topics.py` |
 | DB migrations | `alembic/versions/` |

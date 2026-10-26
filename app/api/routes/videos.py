@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -11,13 +12,9 @@ from sqlalchemy.orm import Session
 from app.core import storage  # ← MinIO клиент (модуль, не класс)
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.topics import TOPIC_VIDEO_REQUESTS
 from app.db.models import Detection, Video
 from app.schemas.video import VideoCreate, VideoRead
-
-# ВАЖНО: app.tasks.processing НЕ импортируется на уровне модуля —
-# он тянет за собой processor → ultralytics → torch, а api живёт в лёгком
-# CPU-образе без torch (см. Dockerfile.cpu). Импортируем задачу лениво,
-# внутри функций, которые реально ею пользуются.
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +23,42 @@ router = APIRouter(prefix="/api/videos", tags=["Videos"])
 # Директория для загруженных видео (оставляем для совместимости)
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Kafka-продюсер задач на обработку видео. Ленивый синглтон: создание
+# Producer — это TCP-соединение с брокером, заводить его на каждый upload
+# расточительно, а на уровне модуля — нельзя (тесты импортируют маршруты
+# без Kafka, да и api может стартовать раньше брокера).
+_kafka_producer = None
+
+
+def _get_kafka_producer():
+    global _kafka_producer
+    if _kafka_producer is None:
+        from confluent_kafka import Producer
+
+        from app.core.topics import KAFKA_BOOTSTRAP_SERVERS
+
+        _kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
+    return _kafka_producer
+
+
+def _enqueue_video_processing(video_id: int) -> None:
+    """Поставить задачу на обработку в топик video_requests.
+
+    Вызывается ПОСЛЕ commit с object_key: консьюмер по пришедшему video_id
+    читает видео из БД — запись обязана быть видна, иначе гонка
+    «задача пришла, а ссылки на файл нет».
+
+    flush() обязателен: produce() лишь кладет сообщение в локальный буфер,
+    без него сообщение может остаться неотправленным к моменту ответа
+    клиенту.
+    """
+    producer = _get_kafka_producer()
+    producer.produce(
+        TOPIC_VIDEO_REQUESTS,
+        value=json.dumps({"video_id": video_id}).encode(),
+    )
+    producer.flush(timeout=5)
 
 
 @router.post("", response_model=VideoRead, status_code=201)
@@ -56,8 +89,8 @@ def upload_video(
     1. Создаём запись в БД (нужен ID для ключа в MinIO)
     2. Сохраняем временный файл → загружаем в MinIO через fput_object (multipart)
     3. Удаляем временный файл
-    4. Отправляем задачу в Celery → ответ клиенту (СРАЗУ!)
-    5. Воркер читает видео НАПРЯМУЮ из MinIO по HTTP (без скачивания)
+    4. Публикуем задачу в Kafka (топик video_requests) → ответ клиенту (СРАЗУ!)
+    5. video_consumer читает видео НАПРЯМУЮ из MinIO по HTTP (без скачивания)
     """
     # Проверяем расширение
     allowed = {".mp4", ".avi", ".mov", ".mkv"}
@@ -96,14 +129,10 @@ def upload_video(
         video.object_key = object_key
         db.commit()
 
-        # Отправляем задачу Celery (ленивый импорт — см. комментарий в шапке модуля)
-        from app.tasks.processing import process_video_task
-
-        task = process_video_task.delay(video.id)
-        video.task_id = task.id
-        db.commit()
+        # Задача на обработку — в Kafka (см. _enqueue_video_processing)
+        _enqueue_video_processing(video.id)
     except Exception:
-        # MinIO/Celery упали ПОСЛЕ создания записи в БД — помечаем failed,
+        # MinIO/Kafka упали ПОСЛЕ создания записи в БД — помечаем failed,
         # иначе видео висит в "processing" навечно, а файла в S3 нет.
         logger.exception("Upload of video %s failed after DB record was created", video.id)
         video.status = "failed"
@@ -185,22 +214,21 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{video_id}/status")
 def get_video_status(video_id: int, db: Session = Depends(get_db)):
-    """Проверить статус обработки видео."""
+    """Проверить статус обработки видео.
+
+    Единственный источник правды — БД: video_consumer пишет туда status и
+    прогресс (processed_frames/frames_to_process) по ходу разбора кадров.
+    """
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    result = {"video_id": video_id, "status": video.status}
-
-    if video.task_id:
-        from app.tasks.processing import process_video_task
-
-        task = process_video_task.AsyncResult(video.task_id)
-        result["task_status"] = task.status
-        if task.failed():
-            result["error"] = str(task.result)
-
-    return result
+    return {
+        "video_id": video_id,
+        "status": video.status,
+        "processed_frames": video.processed_frames,
+        "frames_to_process": video.frames_to_process,
+    }
 
 
 @router.get("/{video_id}/frame")

@@ -1,10 +1,10 @@
-"""YOLO Consumer — читает кадры из Kafka, обрабатывает YOLO, отправляет детекции
+"""YOLO Consumer вЂ” С‡РёС‚Р°РµС‚ РєР°РґСЂС‹ РёР· Kafka, РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚ YOLO, РѕС‚РїСЂР°РІР»СЏРµС‚ РґРµС‚РµРєС†РёРё
 
-Phase 4: Сохраняем ЧИСТЫЕ кадры со стримов в MinIO.
-Стрим — ephemeral (прошёл и исчез), поэтому кадры нужно сохранить,
-чтобы потом показать их с наложенными детекциями из БД.
-Кадры сохраняются ТОЛЬКО если на них есть детекции —
-нет смысла хранить пустые кадры.
+Phase 4: РЎРѕС…СЂР°РЅСЏРµРј Р§РРЎРўР«Р• РєР°РґСЂС‹ СЃРѕ СЃС‚СЂРёРјРѕРІ РІ MinIO.
+РЎС‚СЂРёРј вЂ” ephemeral (РїСЂРѕС€С‘Р» Рё РёСЃС‡РµР·), РїРѕСЌС‚РѕРјСѓ РєР°РґСЂС‹ РЅСѓР¶РЅРѕ СЃРѕС…СЂР°РЅРёС‚СЊ,
+С‡С‚РѕР±С‹ РїРѕС‚РѕРј РїРѕРєР°Р·Р°С‚СЊ РёС… СЃ РЅР°Р»РѕР¶РµРЅРЅС‹РјРё РґРµС‚РµРєС†РёСЏРјРё РёР· Р‘Р”.
+РљР°РґСЂС‹ СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ РўРћР›Р¬РљРћ РµСЃР»Рё РЅР° РЅРёС… РµСЃС‚СЊ РґРµС‚РµРєС†РёРё вЂ”
+РЅРµС‚ СЃРјС‹СЃР»Р° С…СЂР°РЅРёС‚СЊ РїСѓСЃС‚С‹Рµ РєР°РґСЂС‹.
 """
 import base64
 import json
@@ -15,7 +15,8 @@ import numpy as np
 from confluent_kafka import Consumer, Producer
 
 from app.core.config import settings
-from app.streaming.topics import (
+from app.core.cuda import is_fatal_cuda_error
+from app.core.topics import (
     KAFKA_BOOTSTRAP_SERVERS,
     TOPIC_DETECTIONS,
     TOPIC_RAW_FRAMES,
@@ -119,7 +120,7 @@ class YOLOConsumer:
                     self.consecutive_failures += 1
                     topic_name = msg.topic()
                     offset = msg.offset()
-                    if _is_fatal_cuda_error(exc):
+                    if is_fatal_cuda_error(exc):
                         # Липкая CUDA-ошибка: следующий кадр упадёт так же,
                         # и следующий, и дальше вечно — «пропуск» тут только
                         # сжигает offset'ы. Выходим, контейнер рестартует
@@ -208,7 +209,7 @@ if __name__ == "__main__":
 
     # Веса: аргумент CLI > WEIGHTS_PATH (settings). Без аргумента — None,
     # чтобы YOLOConsumer взял путь из настроек; fallback "yolov8n.pt" здесь
-    # захардкодил бы nano навсегда, как бы ни был озаглавлен compose-команд.
+    # захардкодил бы nano навсегда, как бы ни был озаглавлен compose-командой.
     model = sys.argv[1] if len(sys.argv) > 1 else None
     # Без явного аргумента устройство берётся из настроек:
     # DEVICE=auto → cuda при наличии GPU, иначе cpu (проект не падает без NVIDIA)

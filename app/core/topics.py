@@ -6,6 +6,9 @@ KAFKA_BOOTSTRAP_SERVERS = settings.kafka_bootstrap_servers
 
 TOPIC_RAW_FRAMES = "raw_frames"
 TOPIC_DETECTIONS = "detections"
+# Очередь задач на обработку загруженных видео (заменила Celery/Redis):
+# API пишет {video_id} после загрузки в MinIO, video_consumer забирает.
+TOPIC_VIDEO_REQUESTS = "video_requests"
 
 # Параметры самих топиков (partition/retention) задаёт сервис kafka-init
 # в docker-compose.yml — единственное место, где они реально применяются.

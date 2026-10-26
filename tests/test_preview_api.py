@@ -5,7 +5,7 @@
 - GET /api/streams/{id}/detections?frame_index=...
 - GET /api/streams/{id}/latest-frame (с моком storage.list_objects)
 
-Все тесты — герметичные: БД in-memory, MinIO/Kafka/Redis замоканы.
+Все тесты — герметичные: БД in-memory, MinIO/Kafka замоканы.
 """
 from unittest.mock import patch
 

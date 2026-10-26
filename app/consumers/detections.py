@@ -5,8 +5,8 @@ import logging
 from confluent_kafka import Consumer
 
 from app.core.database import SessionLocal
+from app.core.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_DETECTIONS
 from app.db.models import Detection
-from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_DETECTIONS
 
 # Настройка логгера (после импортов — E402)
 logging.basicConfig(

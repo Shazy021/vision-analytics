@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
-from app.video.extractor import VideoCapture
+from app.processing.extractor import VideoCapture
 
 
 @pytest.fixture(scope='session')

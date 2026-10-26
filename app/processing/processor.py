@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 from app.core import storage
 from app.core.config import settings
 from app.db.models import Detection, Video
-from app.detection.yolo import YOLODetector
-from app.video.extractor import VideoCapture
+from app.processing.detector import YOLODetector
+from app.processing.extractor import VideoCapture
 
 logger = logging.getLogger(__name__)
 

@@ -4,11 +4,13 @@
 TestClient — это "фейковый клиент" который делает HTTP-запросы
 без реального запуска сервера. Не нужен uvicorn, не нужен браузер.
 """
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.core.database import get_db
+from app.core.topics import TOPIC_VIDEO_REQUESTS
 from app.db.models import Detection, Stream, Video
 from app.main import app
 
@@ -130,6 +132,41 @@ def test_upload_marks_failed_when_storage_down(client):
     video = db.get(Video, 1)
     assert video.status == "failed"
     assert video.object_key is None
+    db.close()
+
+
+def test_upload_publishes_task_to_kafka(client):
+    """Успешный upload публикует {video_id} в топик video_requests и делает flush."""
+    with patch("app.core.storage.upload_file"), \
+         patch("app.api.routes.videos._get_kafka_producer") as mock_get_producer:
+        producer = MagicMock()
+        mock_get_producer.return_value = producer
+        response = client.post(
+            "/api/videos/upload",
+            files={"file": ("clip.mp4", b"0" * 100, "video/mp4")},
+        )
+
+    assert response.status_code == 201
+    topic, kwargs = producer.produce.call_args[0], producer.produce.call_args[1]
+    assert topic[0] == TOPIC_VIDEO_REQUESTS
+    assert json.loads(kwargs["value"]) == {"video_id": 1}
+    # Без flush сообщение осталось бы в локальном буфере продюсера
+    producer.flush.assert_called_once()
+
+
+def test_upload_marks_failed_when_kafka_down(client):
+    """Kafka недоступна → 500 и failed, а не вечный processing без задачи."""
+    with patch("app.core.storage.upload_file"), \
+         patch("app.api.routes.videos._enqueue_video_processing",
+               side_effect=Exception("Kafka down")):
+        response = client.post(
+            "/api/videos/upload",
+            files={"file": ("clip.mp4", b"0" * 100, "video/mp4")},
+        )
+    assert response.status_code == 500
+
+    db = _db_session()
+    assert db.get(Video, 1).status == "failed"
     db.close()
 
 

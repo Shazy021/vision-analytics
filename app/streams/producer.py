@@ -17,7 +17,7 @@ import time
 import cv2
 from confluent_kafka import Producer
 
-from app.streaming.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_RAW_FRAMES
+from app.core.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_RAW_FRAMES
 
 logger = logging.getLogger(__name__)
 
