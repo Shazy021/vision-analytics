@@ -13,7 +13,7 @@
 # ============================================================
 
 services:
-  worker:
+  video-consumer:
     deploy:
       resources:
         reservations:
