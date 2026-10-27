@@ -56,6 +56,9 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin123}
       S3_BUCKET: ${S3_BUCKET:-vision}
+      # Чанкование: API планирует план диспетчеризации при загрузке
+      VIDEO_CHUNK_SEC: ${VIDEO_CHUNK_SEC:-30}
+      VIDEO_MIN_CHUNK_DURATION: ${VIDEO_MIN_CHUNK_DURATION:-45}
     volumes:
       - ./uploads:/app/uploads
       - ./models_cache:/app/models_cache
@@ -140,8 +143,11 @@ services:
       --config retention.ms=86400000
       &&
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
-      --topic video_requests --partitions 3 --replication-factor 1
+      --topic video_requests --partitions 8 --replication-factor 1
       --config retention.ms=86400000
+      &&
+      ( kafka-topics --bootstrap-server kafka:29092 --alter --topic video_requests --partitions 8
+      || echo 'video_requests already has >= 8 partitions' )
       &&
       echo '--- Kafka topics ready ---'
       && kafka-topics --bootstrap-server kafka:29092 --list
@@ -195,9 +201,13 @@ services:
   # processor.py, что раньше выполнял Celery-воркер. Статус и прогресс —
   # в БД, offset Kafka коммитится после обработки (at-least-once).
   #
-  # Реплик было 2 у Celery-воркера — здесь то же самое: Kafka раздаёт
-  # партиции (у топика 3) консьюмерам одной группы, лишние ждут.
+  # Длинные видео API режет на чанки по времени (см. app/processing/
+  # planner.py): в топике оказывается N задач по срезу [start_s, end_s),
+  # и реплики группы берут их ПАРАЛЛЕЛЬНО — отсюда 8 партиций у топика.
+  # Короткие видео — одна задача, одиночный проход.
+  #
   # Каждая реплика грузит модель в VRAM — мало памяти, поставь replicas: 1.
+  # Больше реплик, чем партиций, смысла нет (лишние ждут).
   # ============================================================
   video-consumer:
     build:
@@ -217,6 +227,9 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin123}
       S3_BUCKET: ${S3_BUCKET:-vision}
+      # Воркер перестраивает план чанков из тех же параметров, что и API
+      VIDEO_CHUNK_SEC: ${VIDEO_CHUNK_SEC:-30}
+      VIDEO_MIN_CHUNK_DURATION: ${VIDEO_MIN_CHUNK_DURATION:-45}
     volumes:
       - ./models_cache:/app/models_cache
     depends_on:
