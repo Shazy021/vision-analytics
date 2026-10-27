@@ -17,6 +17,7 @@ Streamlit-дашборд для Vision Analytics Platform (v2 — визуаль
 import base64
 import io
 import json
+import math
 import os
 import statistics
 import time
@@ -341,11 +342,43 @@ def get_processing_params():
         return None
 
 
-def search_params_caption(extract_fps=None, max_frames=None) -> str:
+@st.cache_data(show_spinner="Читаем метаданные видео...")
+def probe_video_fps(name, size, data):
+    """Нативный FPS загруженного файла: пишем во временный файл и читаем
+    метаданные через cv2. Нужен только для верхней границы ползунка
+    выборки — при неудаче возвращаем None и остаёмся на дефолтном макс 15.
+
+    Кэш бьётся по (name, size): data в хеш не отдаём — файл может быть
+    сотни МБ, а name+size достаточно, чтобы различить загрузку разных
+    роликов (перезапись одного имени тем же размером — редкость).
+    """
+    import tempfile
+
+    import cv2
+    fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(name)[1] or ".mp4")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        cap = cv2.VideoCapture(tmp)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        return fps if fps and fps > 0 else None
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def search_params_caption(extract_fps=None, max_frames=None, native_fps=None) -> str:
     """Строка «где ищем детекции»: частота выборки кадров и потолок.
 
     extract_fps/max_frames — параметры конкретного видео (из ответа API);
     None — берём платформенные дефолты из /api/videos/params.
+    native_fps — FPS исходного файла; если выборка >= него, processor
+    берёт шаг 1 (каждый кадр) — честно говорим об этом вместо «~N раз/с».
     """
     p = get_processing_params() or {}
     ef = extract_fps or p.get("extract_fps")
@@ -354,7 +387,9 @@ def search_params_caption(extract_fps=None, max_frames=None) -> str:
         return ""
     limit = ("без лимита" if not mf
              else f"лимит {mf} прочитанных кадров")
-    return f"🔎 Детекции ищем ~{ef} раз/с, {limit}."
+    rate = ("КАЖДЫЙ кадр" if native_fps and ef >= native_fps
+            else f"~{ef} раз/с")
+    return f"🔎 Детекции ищем {rate}, {limit}."
 
 
 def get_latest_stream_frame(stream_id):
@@ -873,7 +908,7 @@ if page == "📹 Видео":
             total = data.get("frames_to_process")
             if total:
                 frac = min(1.0, (done or 0) / total)
-                st.progress(frac, text=f"⏳ Обработка: {done or 0} / {total} кадров")
+                st.progress(frac, text=f"⏳ Обработка: {done or 0} / {total} отобранных кадров")
             else:
                 st.progress(0.0, text="⏳ Воркер открывает видео…")
             st.caption(
@@ -993,13 +1028,20 @@ if page == "📹 Видео":
     # успешной загрузки uploader очищается (st.rerun) и они исчезают.
     if uploaded_file is not None:
         p_defaults = get_processing_params() or {}
+        # Верх границы ползунка = нативный FPS файла: выше него step и так
+        # схлопывается в 1 (каждый кадр), крутить дальше бессмысленно.
+        native_fps = probe_video_fps(
+            uploaded_file.name, uploaded_file.size, uploaded_file.getvalue()
+        )
+        max_fps = max(15, math.ceil(native_fps)) if native_fps else 15
         uc1, uc2 = st.columns(2)
         with uc1:
             up_extract_fps = st.slider(
-                "Частота выборки (кадров/с)", 1, 15,
-                int(p_defaults.get("extract_fps") or 5),
+                "Частота выборки (кадров/с)", 1, max_fps,
+                min(max(1, int(p_defaults.get("extract_fps") or 5)), max_fps),
                 help="Как часто брать кадры из видео под YOLO. Чаще — мельче "
-                     "сетка, но дольше обработка.",
+                     "сетка, но дольше обработка. Максимум = FPS исходника: "
+                     "на нём обрабатывается КАЖДЫЙ кадр видео.",
             )
         with uc2:
             up_max_frames = st.number_input(
@@ -1008,7 +1050,7 @@ if page == "📹 Видео":
                 help="Потолок ПРОЧИТАННЫХ кадров. Для длинных записей режет "
                      "время обработки: хватит первых N секунд.",
             )
-        st.caption(search_params_caption(up_extract_fps, up_max_frames))
+        st.caption(search_params_caption(up_extract_fps, up_max_frames, native_fps))
 
     if uploaded_file is not None:
         if st.button("🚀 Загрузить и обработать"):

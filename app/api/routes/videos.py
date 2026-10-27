@@ -128,7 +128,7 @@ def create_video(video_in: VideoCreate, db: Session = Depends(get_db)):
 @router.post("/upload", response_model=VideoRead, status_code=201)
 def upload_video(
     file: UploadFile = File(...),
-    extract_fps: int | None = Form(None, ge=1, le=30),
+    extract_fps: int | None = Form(None, ge=1, le=240),
     max_frames: int | None = Form(None, ge=0),
     db: Session = Depends(get_db),
 ):
