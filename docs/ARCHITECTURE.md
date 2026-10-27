@@ -36,7 +36,11 @@ FastAPI: upload_video()
 1. Create Video row in DB (status: "processing")
 2. Save file to temp disk -> upload to MinIO via fput_object (multipart)
 3. Delete temp file
-4. Publish task to Kafka: topic video_requests, value {"video_id": id}
+4. Dispatch plan (app/processing/planner.py): short video
+   (< video_min_chunk_duration) -> a single task {"video_id": id};
+   long -> a package of chunks {"video_id", "start_s", "end_s"} of
+   video_chunk_sec seconds each, spread round-robin over the 8
+   partitions of the video_requests topic
 5. Return 201 immediately (client polls /api/videos/{id}/status)
 ```
 
@@ -45,19 +49,31 @@ FastAPI: upload_video()
 ### 3. Video Processing (video_consumer)
 
 ```
-VideoConsumer: poll video_requests -> {"video_id": id}
+VideoConsumer: poll video_requests
     |
-app.processing.processor.process_video()
+    +-- {"video_id"}                    -> process_video()  — whole file, single pass
+    +-- {"video_id","start_s","end_s"}  -> process_video_chunk() — slice [start_s, end_s)
+    |
+app.processing.processor
     |
 - Reads video DIRECTLY from MinIO via HTTP (OpenCV + FFmpeg streaming)
 - Does NOT download to disk
     |
+- Long videos are chunked: chunks of one video are spread over
+  partitions and processed IN PARALLEL by different video-consumer
+  replicas (roundrobin assignment; messages carry no key — a key
+  would pin all chunks of a video to one partition/replica)
+- Frame ownership follows a TIME grid: a chunk owns the marks
+  k/extract_fps inside its range; a mark's sample is the first decoded
+  frame with t >= mark (VFR-immune; an index grid breaks on VFR)
 - YOLO detection every Nth frame (controlled by settings.extract_fps)
-- app.processing.detector.YOLODetector.detect()
     |
 - Creates Detection rows in DB:
   frame_index, timestamp, class_name, bbox, confidence
     |
+- Progress and finalization are atomic SQL increments (processed_frames,
+  chunks_done): replicas write concurrently; whoever brings chunks_done
+  up to chunks_total sets the terminal status
 - Updates Video.status = "completed" | "partial" | "failed"
 - Updates Video.duration, Video.fps
 ```
@@ -66,11 +82,13 @@ Note: the video file is already in MinIO from step 2. The processor does NOT
 re-upload it. It reads via presigned URL.
 
 Delivery semantics: at-least-once. The consumer commits the Kafka offset only
-after processing finishes, so a crash mid-video redelivers the task;
-process_video() is idempotent (it deletes the video's detections first).
-Permanent failures are marked `failed` in the DB and the offset is committed,
-so a corrupt file cannot wedge the queue. Sticky CUDA errors exit without a
-commit — the container restarts and the task is retried in a fresh context.
+after processing finishes, so a crash mid-video redelivers the task.
+Idempotency: process_video() deletes the video's detections wholesale,
+process_video_chunk() only those inside its OWN range [start_s, end_s),
+so a chunk redelivery cannot duplicate rows. Permanent failures are marked
+`failed` in the DB and the offset is committed, so a corrupt file cannot
+wedge the queue. Sticky CUDA errors exit without a commit — the container
+restarts and the task is retried in a fresh context.
 
 ---
 
@@ -319,14 +337,16 @@ pyproject.toml                  # Deps (PEP 621): base + extras gpu/dash/dev;
 Client -> POST /api/videos/upload
     |
     v
-FastAPI: create Video row -> upload file to MinIO -> publish to Kafka "video_requests"
+FastAPI: create Video row -> upload file to MinIO -> publish task
+(or a package of time chunks) to Kafka "video_requests"
     |
     v
-VideoConsumer: process_video()
+VideoConsumer (x replicas): process_video() / process_video_chunk()
     |  read video from MinIO via HTTP (presigned URL)
+    |  chunks of one video are chewed by replicas IN PARALLEL (time-grid ownership)
     |  YOLO detect every Nth frame
     |  write Detection rows to PostgreSQL
-    |  update Video.status
+    |  atomic progress increments, finalize when chunks_done == chunks_total
     v
 Client polls GET /api/videos/{id}/status -> "completed"
 ```

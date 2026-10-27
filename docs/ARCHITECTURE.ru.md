@@ -36,7 +36,11 @@ FastAPI: upload_video()
 1. Создаётся запись Video в БД (статус: "processing")
 2. Файл сохраняется во временную папку -> загружается в MinIO через fput_object (multipart)
 3. Временный файл удаляется
-4. Задача публикуется в Kafka: топик video_requests, значение {"video_id": id}
+4. План диспетчеризации (app/processing/planner.py): короткое видео
+   (< video_min_chunk_duration) -> одна задача {"video_id": id};
+   длинное -> пакет чанков {"video_id", "start_s", "end_s"} по
+   video_chunk_sec секунд, разложенный ротацией по 8 партициям
+   топика video_requests
 5. Возврат 201 мгновенно (клиент опрашивает /api/videos/{id}/status)
 ```
 
@@ -45,20 +49,32 @@ FastAPI: upload_video()
 ### 3. Обработка видео (video_consumer)
 
 ```
-VideoConsumer: читает video_requests -> {"video_id": id}
+VideoConsumer: читает video_requests
     |
-app.processing.processor.process_video()
+    +-- {"video_id"}                    -> process_video()  — весь файл одним проходом
+    +-- {"video_id","start_s","end_s"}  -> process_video_chunk() — срез [start_s, end_s)
+    |
+app.processing.processor
     |
 - Читает видео НАПРЯМУЮ из MinIO по HTTP (OpenCV + FFmpeg streaming)
 - НЕ скачивает на диск
     |
+- Чанкование длинных видео: чанки одного видео распределяются по
+  партициям и обрабатываются ПАРАЛЛЕЛЬНО разными репликами
+  video-consumer (roundrobin assignment, без key у сообщения —
+  key приковал бы все чанки к одной партиции/реплике)
+- Владение кадрами — по ВРЕМЕННОЙ сетке: чанк отвечает за отметки
+  k/extract_fps в своём диапазоне; сэмпл отметки — первый декодированный
+  кадр с t >= отметки (иммунитет к VFR; индексная сетка на VFR ломается)
 - YOLO детекция каждого N-го кадра (управляется settings.extract_fps)
-- app.processing.detector.YOLODetector.detect()
     |
 - Создаются записи Detection в БД:
   frame_index, timestamp, class_name, bbox, confidence
     |
-- Обновляется Video.status = "completed" | "partial" | "failed"
+- Прогресс и финализация — атомарные SQL-инкременты (processed_frames,
+  chunks_done): реплики пишут конкурентно; кто довёл chunks_done до
+  chunks_total — ставит терминальный статус
+- Video.status = "completed" | "partial" | "failed"
 - Обновляются Video.duration, Video.fps
 ```
 
@@ -67,8 +83,10 @@ app.processing.processor.process_video()
 
 Гарантии доставки — at-least-once: консьюмер коммитит offset Kafka только
 после обработки, поэтому падение процесса посреди видео приводит к повторной
-доставке задачи; process_video() идемпотентен (в начале удаляет детекции
-видео). Перманентные ошибки помечаются в БД как `failed`, и offset коммитится —
+доставке задачи. Идемпотентность: process_video() удаляет детекции видео
+целиком, process_video_chunk() — только в СОБСТВЕННОМ диапазоне
+[start_s, end_s), поэтому redelivery чанка не плодит дубли. Перманентные
+ошибки помечаются в БД как `failed`, и offset коммитится —
 битый файл не может заклинить очередь. Липкая CUDA-ошибка — выход БЕЗ коммита:
 контейнер рестартует, задача повторится в свежем контексте.
 
@@ -317,14 +335,16 @@ pyproject.toml                  # Зависимости (PEP 621): база + e
 Клиент -> POST /api/videos/upload
     |
     v
-FastAPI: создать запись Video -> загрузить файл в MinIO -> опубликовать задачу в Kafka "video_requests"
+FastAPI: создать запись Video -> загрузить файл в MinIO -> опубликовать
+задачу (или пакет чанков) в Kafka "video_requests"
     |
     v
-VideoConsumer: process_video()
+VideoConsumer (x replicas): process_video() / process_video_chunk()
     |  читает видео из MinIO по HTTP (presigned URL)
+    |  чанки одного видео жуются репликами ПАРАЛЛЕЛЬНО (time-grid владение)
     |  YOLO детекция каждого N-го кадра
     |  запись строк Detection в PostgreSQL
-    |  обновление Video.status
+    |  атомарные инкременты прогресса, финализация по chunks_done
     v
 Клиент опрашивает GET /api/videos/{id}/status -> "completed"
 ```
