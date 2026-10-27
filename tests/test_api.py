@@ -154,11 +154,43 @@ def test_upload_publishes_task_to_kafka(client):
     producer.flush.assert_called_once()
 
 
+def test_upload_long_video_publishes_chunk_tasks(client):
+    """Длинное видео (проба: 300с) → пакет чанковых сообщений и
+    счётчики в БД; короткое (тест выше) — одна классическая задача."""
+    with patch("app.core.storage.upload_file"), \
+         patch("app.api.routes.videos.probe_media", return_value=(300.0, 30.0)), \
+         patch("app.api.routes.videos._get_kafka_producer") as mock_get_producer:
+        producer = MagicMock()
+        mock_get_producer.return_value = producer
+        response = client.post(
+            "/api/videos/upload",
+            files={"file": ("long.mp4", b"0" * 100, "video/mp4")},
+        )
+
+    assert response.status_code == 201
+    # 300с / 30с = 10 чанков
+    assert producer.produce.call_count == 10
+    first = json.loads(producer.produce.call_args_list[0][1]["value"])
+    assert first == {"video_id": 1, "start_s": 0.0, "end_s": 30.0}
+    last = json.loads(producer.produce.call_args_list[-1][1]["value"])
+    assert last["start_s"] == 270.0
+    assert last["end_s"] == 300.0
+    producer.flush.assert_called_once()
+
+    db = _db_session()
+    video = db.get(Video, 1)
+    assert video.chunks_total == 10
+    assert video.chunks_done == 0
+    assert video.duration == 300.0
+    assert video.fps == 30
+    db.close()
+
+
 def test_upload_marks_failed_when_kafka_down(client):
     """Kafka недоступна → 500 и failed, а не вечный processing без задачи."""
     with patch("app.core.storage.upload_file"), \
-         patch("app.api.routes.videos._enqueue_video_processing",
-               side_effect=Exception("Kafka down")):
+         patch("app.api.routes.videos._enqueue_video_tasks",
+                side_effect=Exception("Kafka down")):
         response = client.post(
             "/api/videos/upload",
             files={"file": ("clip.mp4", b"0" * 100, "video/mp4")},

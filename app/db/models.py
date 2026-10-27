@@ -37,6 +37,13 @@ class Video(Base):
     extract_fps = Column(Integer, nullable=True)
     max_frames = Column(Integer, nullable=True)
 
+    # Чанкование: planner на этапе загрузки пишет chunks_total (сколько
+    # чанковых задач опубликовано в Kafka), processor атомарно инкрементит
+    # chunks_done после каждого чанка. Кто довёл done до total — тот ставит
+    # терминальный статус. NULL = видео не чанковалось (одиночная трасса).
+    chunks_total = Column(Integer, nullable=True)
+    chunks_done = Column(Integer, nullable=True)
+
     # cascade: удаление Video автоматически удаляет его Detection
     detections = relationship("Detection", back_populates="video", cascade="all, delete-orphan")
 

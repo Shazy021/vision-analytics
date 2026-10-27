@@ -36,6 +36,10 @@ class VideoRead(VideoBase):
     # текущая позиция. None, пока processor не открыл файл.
     frames_to_process: int | None = None
     processed_frames: int | None = None
+    # Чанковая обработка: сколько чанков запланировано и сколько готово.
+    # None = видео не чанковалось (одиночная трасса).
+    chunks_total: int | None = None
+    chunks_done: int | None = None
     # Параметры разбора этого видео (оверрайд при загрузке).
     # None = применялись платформенные дефолты.
     extract_fps: int | None = None

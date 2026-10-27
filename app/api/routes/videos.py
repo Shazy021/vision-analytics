@@ -1,6 +1,8 @@
 import json
 import logging
+import math
 import os
+import random
 import shutil
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.topics import TOPIC_VIDEO_REQUESTS
 from app.db.models import Detection, Video
+from app.processing.planner import plan_chunks, probe_media, should_chunk
 from app.schemas.video import VideoCreate, VideoRead
 
 logger = logging.getLogger(__name__)
@@ -38,26 +41,77 @@ def _get_kafka_producer():
 
         from app.core.topics import KAFKA_BOOTSTRAP_SERVERS
 
+        # Ключ сообщения НЕ ставим: key по video_id приковал бы все
+        # чанки одного видео к одной партиции — обрабатывал бы их один
+        # консьюмер последовательно. Партицию выбираем явно (см.
+        # _enqueue_video_tasks).
         _kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
     return _kafka_producer
 
 
-def _enqueue_video_processing(video_id: int) -> None:
-    """Поставить задачу на обработку в топик video_requests.
+def _plan_video_tasks(video: Video, db: Session) -> list[dict]:
+    """План диспетчеризации обработки: одна задача или пакет чанков.
+
+    Долгое видео (>= video_min_chunk_duration) режется на чанки по
+    времени — каждая становится отдельным сообщением, и разные реплики
+    video-consumer берут их параллельно. Короткое — классической
+    одиночной задачей (оверхед N открытий/seek'ов не окупается).
+
+    Для чанкового видео ПЕРЕД публикацией фиксируем в БД chunks_total,
+    chunks_done и frames_to_process: консьюмер и дашборд опираются на них.
+    """
+    if video.duration and should_chunk(video.duration, settings.video_min_chunk_duration):
+        chunks = plan_chunks(video.duration, settings.video_chunk_sec)
+        extract_fps = video.extract_fps or settings.extract_fps
+        # Цель = число отметок сетки в [0, duration): ceil, а не int
+        # (59.999с × 15 = 899.985 → отметок ровно 900, int дал бы 899
+        # и прогресс переваливал бы за 100%).
+        target = math.ceil(video.duration * extract_fps)
+        max_frames = settings.max_frames if video.max_frames is None else video.max_frames
+        if max_frames > 0 and video.fps:
+            step = max(1, int(video.fps / extract_fps))
+            target = min(target, max(1, max_frames // step))
+        video.chunks_total = len(chunks)
+        video.chunks_done = 0
+        video.frames_to_process = target
+        db.commit()
+        logger.info(
+            "Video %s: %.0fs -> %d chunks x %.0fs",
+            video.id, video.duration, len(chunks), settings.video_chunk_sec,
+        )
+        return [
+            {"video_id": video.id, "start_s": s, "end_s": e} for s, e in chunks
+        ]
+    return [{"video_id": video.id}]
+
+
+def _enqueue_video_tasks(tasks: list[dict]) -> None:
+    """Поставить задачи на обработку в топик video_requests.
 
     Вызывается ПОСЛЕ commit с object_key: консьюмер по пришедшему video_id
     читает видео из БД — запись обязана быть видна, иначе гонка
     «задача пришла, а ссылки на файл нет».
 
+    Чанки одного видео раскладываем по партициям круговым ротацией со
+    случайным стартом: консьюмеры группы с partition.assignment.strategy
+    = roundrobin получают соседние партиции по очереди, поэтому пакеты
+    чанков разносятся по разным репликам. Без этого два чанка могли
+    угодить в одну партицию и жеваться одной репликой последовательно.
+
     flush() обязателен: produce() лишь кладет сообщение в локальный буфер,
-    без него сообщение может остаться неотправленным к моменту ответа
+    без него сообщения могут остаться неотправленными к моменту ответа
     клиенту.
     """
     producer = _get_kafka_producer()
-    producer.produce(
-        TOPIC_VIDEO_REQUESTS,
-        value=json.dumps({"video_id": video_id}).encode(),
-    )
+    md = producer.list_topics(TOPIC_VIDEO_REQUESTS, timeout=5)
+    n_partitions = max(1, len(md.topics[TOPIC_VIDEO_REQUESTS].partitions))
+    base = random.randrange(n_partitions)
+    for i, task in enumerate(tasks):
+        producer.produce(
+            TOPIC_VIDEO_REQUESTS,
+            value=json.dumps(task).encode(),
+            partition=(base + i) % n_partitions,
+        )
     producer.flush(timeout=5)
 
 
@@ -118,6 +172,13 @@ def upload_video(
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    # Проба метаданных ДО загрузки (локальный файл, без сети): длительность
+    # определяет, чанковать видео или нет. Нечитаемые метаданные — None,
+    # деградируем в одиночную трассу (processor разберётся сам).
+    media = probe_media(str(temp_path))
+    if media:
+        video.duration, video.fps = media[0], int(media[1]) if media[1] > 0 else None
+
     object_key = f"videos/{video.id}{ext}"
     try:
         storage.upload_file(object_key, str(temp_path), content_type="video/mp4")
@@ -129,8 +190,9 @@ def upload_video(
         video.object_key = object_key
         db.commit()
 
-        # Задача на обработку — в Kafka (см. _enqueue_video_processing)
-        _enqueue_video_processing(video.id)
+        # План обработки (одна задача или пакет чанков) → Kafka
+        tasks = _plan_video_tasks(video, db)
+        _enqueue_video_tasks(tasks)
     except Exception:
         # MinIO/Kafka упали ПОСЛЕ создания записи в БД — помечаем failed,
         # иначе видео висит в "processing" навечно, а файла в S3 нет.

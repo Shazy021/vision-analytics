@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     extract_fps: int = 5
     max_frames: int = 300  # 0 = без лимита, иначе обработать только N кадров
 
+    # --- Чанкование видео ---
+    # Длинные видео режутся на чанки по времени, которые параллельно берут
+    # разные реплики video-consumer (см. app/processing/planner.py).
+    # Короткие не режутся: оверхед N открытий/seek'ов съест выигрыш.
+    # Порог 45с, а не 60: длительность из метаданных jitter-ит (видео
+    # «на 1 минуту» = 1500 кадров / 25.0004 fps = 59.999с < 60).
+    video_chunk_sec: float = 30.0
+    video_min_chunk_duration: float = 45.0
+
     # --- Kafka ---
     kafka_bootstrap_servers: str = "localhost:9092"
 

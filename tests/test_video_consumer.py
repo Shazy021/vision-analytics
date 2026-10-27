@@ -68,6 +68,66 @@ class TestVideoConsumerHandle:
         mock_db.close.assert_called_once()
 
 
+class TestVideoConsumerChunkRouting:
+    def test_chunk_payload_routes_to_process_video_chunk(self):
+        """Сообщение с диапазоном [start_s, end_s) — чанковая задача."""
+        c = _make_consumer()
+        mock_db = MagicMock()
+
+        with patch("app.consumers.video.SessionLocal", return_value=mock_db), \
+             patch("app.consumers.video.process_video_chunk") as mock_chunk, \
+             patch("app.consumers.video.process_video") as mock_whole:
+            c._handle(_make_chunk_msg(video_id=42, start_s=30.0, end_s=60.0))
+
+        mock_chunk.assert_called_once_with(42, 30.0, 60.0, mock_db)
+        mock_whole.assert_not_called()
+        mock_db.close.assert_called_once()
+
+    def test_legacy_payload_routes_to_process_video(self):
+        """Сообщение без диапазона (старые версии API, короткие видео) —
+        классический одиночный проход."""
+        c = _make_consumer()
+        mock_db = MagicMock()
+
+        with patch("app.consumers.video.SessionLocal", return_value=mock_db), \
+             patch("app.consumers.video.process_video_chunk") as mock_chunk, \
+             patch("app.consumers.video.process_video") as mock_whole:
+            c._handle(_make_msg(video_id=42))
+
+        mock_whole.assert_called_once_with(42, mock_db)
+        mock_chunk.assert_not_called()
+
+    def test_partial_range_ignored(self):
+        """Только start_s без end_s — не чанк, а битое/чужое сообщение:
+        идём в одиночный проход, а не в чанковый с None."""
+        c = _make_consumer()
+        mock_db = MagicMock()
+        msg = MagicMock()
+        msg.value.return_value = json.dumps(
+            {"video_id": 7, "start_s": 30.0}
+        ).encode()
+        msg.error.return_value = None
+        msg.offset.return_value = 3
+
+        with patch("app.consumers.video.SessionLocal", return_value=mock_db), \
+             patch("app.consumers.video.process_video_chunk") as mock_chunk, \
+             patch("app.consumers.video.process_video") as mock_whole:
+            c._handle(msg)
+
+        mock_whole.assert_called_once_with(7, mock_db)
+        mock_chunk.assert_not_called()
+
+
+def _make_chunk_msg(video_id=7, start_s=0.0, end_s=30.0):
+    msg = MagicMock()
+    msg.value.return_value = json.dumps(
+        {"video_id": video_id, "start_s": start_s, "end_s": end_s}
+    ).encode()
+    msg.error.return_value = None
+    msg.offset.return_value = 3
+    return msg
+
+
 class TestVideoConsumerOffsets:
     def test_success_commits_offset(self):
         """at-least-once: offset коммитится ПОСЛЕ успешной обработки."""

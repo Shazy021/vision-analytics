@@ -24,7 +24,7 @@ from app.core.cuda import is_fatal_cuda_error
 from app.core.database import SessionLocal
 from app.core.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_VIDEO_REQUESTS
 from app.db.models import Video
-from app.processing.processor import process_video
+from app.processing.processor import process_video, process_video_chunk
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +44,11 @@ class VideoConsumer:
             "auto.offset.reset": "earliest",
             # Ручной коммит — ядро at-least-once (см. докстринг модуля)
             "enable.auto.commit": False,
+            # Соседние партиции раздаются консьюмерам по очереди: пакет
+            # чанков одного видео (API раскладывает их ротацией по
+            # партициям) доставляется разным репликам, а не сваливается
+            # одной реплике. Дефолтный range отдал бы p0-p3 одной реплике.
+            "partition.assignment.strategy": "roundrobin",
             # Обработка одного видео — минуты; не даём группе нас выгнать
             "max.poll.interval.ms": 3600000,
         })
@@ -95,15 +100,31 @@ class VideoConsumer:
 
         db = SessionLocal()
         try:
-            logger.info(f"Processing video {video_id} (task received)...")
-            process_video(video_id, db)
-            logger.info(f"Video {video_id} processed")
+            if "start_s" in payload and "end_s" in payload:
+                # Чанковая задача: срез [start_s, end_s) большого видео.
+                # Такие задачи приходят пакетами (по одной на чанк) и
+                # обрабатываются разными репликами параллельно.
+                logger.info(
+                    f"Processing video {video_id} chunk "
+                    f"[{payload['start_s']:.1f},{payload['end_s']:.1f})..."
+                )
+                process_video_chunk(video_id, payload["start_s"], payload["end_s"], db)
+            else:
+                # Классическая задача: всё видео одним проходом
+                # (короткие ролики и сообщения старых версий API).
+                logger.info(f"Processing video {video_id} (task received)...")
+                process_video(video_id, db)
+            logger.info(f"Video {video_id} task done")
         except Exception:
-            # process_video ставит failed сам, но только после того, как нашёл
-            # строку видео. Ошибки ДО этого (нет записи, нет источника) —
-            # помечаем здесь, иначе видео навечно останется в 'processing'.
+            # process_video/process_video_chunk ставят failed сами, но только
+            # после того, как нашли строку видео. Ошибки ДО этого (нет записи,
+            # нет источника) — помечаем здесь, иначе видео навечно останется
+            # в 'processing'. Условие status=='processing': не затыкать
+            # 'completed' поздней ошибкой другого чанка того же видео.
             db.rollback()
-            db.query(Video).filter(Video.id == video_id).update(
+            db.query(Video).filter(
+                Video.id == video_id, Video.status == "processing",
+            ).update(
                 {"status": "failed"}, synchronize_session=False,
             )
             db.commit()

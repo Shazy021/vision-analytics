@@ -8,8 +8,11 @@ OpenCV (cv2.VideoCapture) поддерживает HTTP URL —
 никакого скачивания на диск.
 """
 import logging
+import math
 from pathlib import Path
 
+import cv2
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from app.core import storage
@@ -17,8 +20,22 @@ from app.core.config import settings
 from app.db.models import Detection, Video
 from app.processing.detector import YOLODetector
 from app.processing.extractor import VideoCapture
+from app.processing.planner import allocate_sample_budgets, chunk_slot, plan_chunks
 
 logger = logging.getLogger(__name__)
+
+# Запас при seek в начало чанка: cv2 садится на keyframe ДО цели и
+# докачивает, кадры до границы выбрасываются как preroll. 2с покрывает
+# GOP наших исходников (~1с); на камерах с большим GOP увеличить.
+SEEK_MARGIN_MS = 2000.0
+_EPS_S = 1e-6
+# Сколько попыток декода чанка при преждевременном обрыве потока
+# (сеть/повреждение). Постоянная поломка (битый файл) не лечится
+# ретраями — после последней попытки задача умирает как терминальная.
+CHUNK_ATTEMPTS = 3
+# Как часто чанк докладывать в processed_frames: дашборд показывает
+# живой прогресс, а не «0» до конца чанка (чанк — минуты работы).
+PROGRESS_REPORT_EVERY = 50
 
 
 def _get_video_source(video: Video) -> str:
@@ -181,3 +198,192 @@ def process_video(video_id: int, db: Session) -> None:
         video.status = "failed"
         db.commit()
         raise
+
+
+def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
+                  budget: int, detector: YOLODetector,
+                  on_sample=None) -> tuple[list, int, bool]:
+    """Декод одного чанка [start_s, end_s) с time-grid сэмплированием.
+
+    on_sample(sampled_so_far) вызывается после каждого сэмпла — воркер
+    показывает дашборду прогресс внутри чанка, а не только по его итогам.
+
+    Возвращает (детекции, число сэмплов, достигнут_ли_бюджет).
+    Бросает RuntimeError, если поток оборвался ДО конца диапазона —
+    это повод для ретрая, а не тихое «обрали половину».
+    """
+    detections: list = []
+    sampled = 0
+    with VideoCapture(source) as cap:
+        fps = cap.get(5)
+        if start_s > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, start_s * 1000.0 - SEEK_MARGIN_MS))
+
+        # Владение: чанк отвечает за отметки next_mark..last_mark сетки
+        # k/extract_fps, лежащие в [start_s, end_s). Сэмпл отметки —
+        # первый декодированный кадр с t >= отметки (иммунитет к VFR).
+        next_mark = max(0, math.ceil(start_s / interval - _EPS_S))
+        last_mark = int(math.floor((end_s - _EPS_S) / interval))
+
+        last_t = None
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            t_s = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            last_t = t_s
+            if t_s + _EPS_S < start_s:
+                continue  # preroll: seek сел на keyframe до границы
+            if t_s + _EPS_S >= end_s:
+                break
+            while next_mark <= last_mark and next_mark * interval <= t_s + _EPS_S:
+                frame_index = int(round(t_s * fps)) if fps > 0 else 0
+                detections.extend(
+                    detector.detect(frame, frame_index=frame_index, timestamp=t_s)
+                )
+                sampled += 1
+                next_mark += 1
+                if on_sample is not None:
+                    on_sample(sampled)
+                if budget > 0 and sampled >= budget:
+                    break
+            if budget > 0 and sampled >= budget:
+                break
+
+    hit_budget = budget > 0 and sampled >= budget
+    # Преждевременный обрыв: дошли не до конца диапазона и дело не в бюджете.
+    # Допуск 1с: последний чанк заканчивается ровно на EOF файла.
+    if not hit_budget and (last_t is None or last_t + 1.0 < end_s):
+        raise RuntimeError(
+            f"Chunk [{start_s:.1f},{end_s:.1f}) ended early at {last_t}s — "
+            "stream aborted before chunk end"
+        )
+    return detections, sampled, hit_budget
+
+
+def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session) -> None:
+    """Обработать временной срез [start_s, end_s) видео.
+
+    Параллельные чанки одного видео живут в разных репликах consumer'а,
+    поэтому все изменения состояния идут атомарными SQL-операциями:
+
+    * идемпотентность — DELETE детекций в СОБСТВЕННОМ диапазоне перед
+      вставкой: redelivery чанка не плодит дубли;
+    * прогресс — processed_frames += N (атомарный инкремент);
+    * финализация — chunks_done += 1, кто довёл до chunks_total, тот
+      ставит терминальный статус (условно, чтобы не затереть 'failed').
+    """
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise ValueError(f"Video with id={video_id} not found")
+
+    video_source = _get_video_source(video)
+    extract_fps = video.extract_fps or settings.extract_fps
+    interval = 1.0 / extract_fps
+
+    # Глобальный бюджет max_frames распределяем по чанкам сами: план
+    # детерминирован (duration + chunk_sec), свой слот находится по start_s.
+    budget = 0
+    if video.duration and (video.max_frames if video.max_frames is not None
+                           else settings.max_frames) > 0:
+        fps_meta = video.fps or 0
+        step = max(1, int(fps_meta / extract_fps)) if fps_meta > 0 else 1
+        total_budget = max(1, ((video.max_frames if video.max_frames is not None
+                                else settings.max_frames)) // step)
+        chunks = plan_chunks(video.duration, settings.video_chunk_sec)
+        slot = chunk_slot(chunks, start_s)
+        if slot >= 0:
+            budget = allocate_sample_budgets(len(chunks), total_budget)[slot]
+
+    detector = YOLODetector()
+    last_err: Exception | None = None
+    # Прогресс внутри чанка: каждые PROGRESS_REPORT_EVERY сэмплов —
+    # атомарный инкремент. При ретрае частично зарепортанное откатывается,
+    # повтор пересчитает эти сэмплы заново (итог остаётся точным).
+    reported = 0
+
+    def _report(sampled_so_far: int) -> None:
+        nonlocal reported
+        if sampled_so_far - reported >= PROGRESS_REPORT_EVERY:
+            delta = sampled_so_far - reported
+            db.execute(
+                update(Video)
+                .where(Video.id == video_id)
+                .values(processed_frames=func.coalesce(Video.processed_frames, 0) + delta)
+            )
+            db.commit()
+            reported = sampled_so_far
+
+    for attempt in range(1, CHUNK_ATTEMPTS + 1):
+        reported = 0
+        try:
+            detections, sampled, _hit = _decode_chunk(
+                video_source, start_s, end_s, interval, budget, detector,
+                on_sample=_report,
+            )
+            last_err = None
+            break
+        except Exception as exc:
+            if reported:
+                db.execute(
+                    update(Video)
+                    .where(Video.id == video_id)
+                    .values(processed_frames=func.coalesce(Video.processed_frames, 0) - reported)
+                )
+                db.commit()
+            last_err = exc
+            logger.warning(
+                "Video %s chunk [%.1f,%.1f) attempt %d/%d failed: %s",
+                video_id, start_s, end_s, attempt, CHUNK_ATTEMPTS, exc,
+            )
+    if last_err is not None:
+        raise last_err
+
+    # Идемпотентность: стираем собственный диапазон (redelivery-безопасно)
+    db.query(Detection).filter(
+        Detection.video_id == video_id,
+        Detection.timestamp >= start_s,
+        Detection.timestamp < end_s,
+    ).delete(synchronize_session=False)
+
+    for det in detections:
+        db.add(Detection(
+            video_id=video.id,
+            class_name=det.class_name,
+            confidence=det.confidence,
+            bbox_x1=det.bbox[0],
+            bbox_y1=det.bbox[1],
+            bbox_x2=det.bbox[2],
+            bbox_y2=det.bbox[3],
+            frame_index=det.frame_index,
+            timestamp=det.timestamp,
+        ))
+
+    # Прогресс и финализация — атомарные SQL-инкременты (чанки идут
+    # параллельно в разных репликах, ORM-объектами считать нельзя).
+    # coalesce: колонки NULL у свежего видео, NULL + N в SQL снова NULL.
+    # Прибавляем остаток: часть сэмплов уже зарепортана внутри чанка.
+    db.execute(
+        update(Video)
+        .where(Video.id == video_id)
+        .values(
+            processed_frames=func.coalesce(Video.processed_frames, 0) + (sampled - reported),
+            chunks_done=func.coalesce(Video.chunks_done, 0) + 1,
+        )
+    )
+    db.commit()
+
+    video = db.get(Video, video_id)
+    if (video.chunks_total and video.chunks_done is not None
+            and video.chunks_done >= video.chunks_total and video.status == "processing"):
+        max_frames = video.max_frames if video.max_frames is not None else settings.max_frames
+        video.status = "partial" if max_frames > 0 else "completed"
+        db.commit()
+        logger.info(
+            "Video %s finalized: %d/%d chunks, status=%s",
+            video_id, video.chunks_done, video.chunks_total, video.status,
+        )
+    logger.info(
+        "Video %s chunk [%.1f,%.1f) done: %d samples, %d detections",
+        video_id, start_s, end_s, sampled, len(detections),
+    )
