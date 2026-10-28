@@ -255,9 +255,13 @@ class StreamManager:
         desired = {s.id for s in streams if s.desired_status == "active"}
 
         # 1) Убираем всё, что больше НЕ desired: лишние процессы + память об
-        #    ошибках/крашах. Обходим и детей, и errored (у errored процесса
-        #    уже нет, но состояние сбрасывать надо).
-        for sid in set(self._children) | set(self._errored):
+        #    ошибках/крашах. Обходим детей, errored И стримы со stale-статусом
+        #    в БД: после рестарта менеджера его память пуста, а дочерние
+        #    процессы умерли вместе с ним — если у стрима desired=inactive, а
+        #    status остался "active" из прошлой жизни, чинить его больше
+        #    некому. Без этого случая статус залипает зелёным навсегда.
+        stale_status = {s.id for s in streams if s.status != "inactive"}
+        for sid in set(self._children) | set(self._errored) | stale_status:
             if sid in desired:
                 continue
             self._stop_child(sid)

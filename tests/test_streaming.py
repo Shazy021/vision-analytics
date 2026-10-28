@@ -313,6 +313,23 @@ class TestStreamManager:
         assert db.get(Stream, stream.id).status == "inactive"
         db.close()
 
+    def test_clears_stale_status_after_manager_restart(self):
+        """Регресс: рестарт менеджера не должен оставлять залипший active.
+
+        Симулируем перезапуск: менеджер с пустой памятью (_children пуст —
+        продюсеры умерли вместе со старым процессом), а в БД стрим помечен
+        active при desired=inactive. Раньше шаг «убираем лишнее» обходил
+        только in-memory множества, такой стрим не замечался, и статус жил
+        зелёным навсегда — «стоп не работает» на дашборде.
+        """
+        db, _, stream, spawned, mgr = self._fresh(desired="inactive")
+        db.get(Stream, stream.id).status = "active"  # наследие прошлой жизни
+        db.commit()
+        mgr.reconcile_once(db)
+        assert db.get(Stream, stream.id).status == "inactive"
+        assert spawned == []  # и поднимать ничего не должны
+        db.close()
+
     def test_backoff_marks_error_and_stops(self):
         """Быстрые смерти подряд → status=error, спавнов больше нет (защита от шторма)."""
         db, _, stream, spawned, mgr = self._fresh()
