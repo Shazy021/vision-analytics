@@ -1,4 +1,6 @@
 """Тесты для Kafka streaming модуля"""
+import base64
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -104,6 +106,27 @@ class TestYOLOConsumer:
         assert exc_info.value.code == 1
         consumer.consumer.close.assert_called_once()
 
+    def test_handle_passes_captured_at_through(self):
+        """yolo-consumer обязан пронести captured_at сквозняком: инференс
+        и очередь не должны сдвигать время детекции."""
+        consumer = self._make_consumer()
+        consumer.detector.detect.return_value = []
+
+        msg = MagicMock()
+        msg.value.return_value = json.dumps({
+            "frame_data": base64.b64encode(b"fake-jpeg").decode(),
+            "frame_index": 7,
+            "source": "rtsp://x",
+            "stream_id": 3,
+            "captured_at": "2026-10-28T15:00:00+00:00",
+        }).encode()
+
+        with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
+            consumer._handle(msg)
+
+        produced = json.loads(consumer.producer.produce.call_args.kwargs["value"])
+        assert produced["captured_at"] == "2026-10-28T15:00:00+00:00"
+
     def test_consecutive_failures_trigger_restart(self):
         """N подряд не-CUDA падений — тоже выход, а не бесконечный skip."""
         consumer = self._make_consumer()
@@ -160,6 +183,56 @@ class TestDetectionConsumer:
             mock_db.add.assert_called_once()
             mock_db.commit.assert_called_once()
             mock_db.close.assert_called_once()
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_save_to_db_uses_captured_at(self, mock_session_cls):
+        """captured_at из сообщения становится detected_at (naive UTC),
+        а не временем записи — иначе бэклог «омолаживает» старые кадры."""
+        from datetime import datetime
+
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+
+        from app.consumers.detections import DetectionConsumer
+        consumer = DetectionConsumer.__new__(DetectionConsumer)
+
+        detection = {
+            "stream_id": 1,
+            "frame_index": 42,
+            "captured_at": "2026-10-28T12:00:00+00:00",
+            "objects": [{"class": "person", "confidence": 0.9, "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}}],
+        }
+
+        with patch("app.consumers.detections.StreamDetection") as mock_detection_cls:
+            consumer._save_to_db(detection)
+            kwargs = mock_detection_cls.call_args.kwargs
+            assert kwargs["detected_at"] == datetime(2026, 10, 28, 12, 0, 0)
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_save_to_db_without_captured_at_omits_detected_at(self, mock_session_cls):
+        """Нет captured_at (старые сообщения) — поле не передаём вовсе,
+        чтобы не затереть server_default (now()) явным NULL."""
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+
+        from app.consumers.detections import DetectionConsumer
+        consumer = DetectionConsumer.__new__(DetectionConsumer)
+
+        detection = {
+            "stream_id": 1,
+            "frame_index": 42,
+            "objects": [{"class": "person", "confidence": 0.9, "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}}],
+        }
+
+        with patch("app.consumers.detections.StreamDetection") as mock_detection_cls:
+            consumer._save_to_db(detection)
+            assert "detected_at" not in mock_detection_cls.call_args.kwargs
+
+    def test_parse_captured_at_rejects_garbage(self):
+        """Битый captured_at → None (fallback на now()), а не падение записи."""
+        from app.consumers.detections import _parse_captured_at
+        assert _parse_captured_at("не дата") is None
+        assert _parse_captured_at(None) is None
 
     @patch("app.consumers.detections.SessionLocal")
     def test_save_to_db_rollback_on_error(self, mock_session_cls):

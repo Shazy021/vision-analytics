@@ -1,6 +1,7 @@
 """Kafka Consumer — читает детекции и сохраняет в БД"""
 import json
 import logging
+from datetime import datetime, timezone
 
 from confluent_kafka import Consumer
 
@@ -15,6 +16,25 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
+
+
+def _parse_captured_at(raw: str | None) -> datetime | None:
+    """captured_at из сообщения → naive UTC (тот же стиль, что у now() в колонке).
+
+    None при отсутствии/битом значении — тогда detected_at поставит
+    server_default (now()), как было до появления captured_at: старые
+    сообщения в топике не должны ломать запись.
+    """
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("Некорректный captured_at %r — detected_at возьмём из now()", raw)
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 class DetectionConsumer:
@@ -58,8 +78,9 @@ class DetectionConsumer:
 
         db = SessionLocal()
         try:
+            captured_at = _parse_captured_at(detection.get("captured_at"))
             for obj in detection.get("objects", []):
-                db_obj = StreamDetection(
+                fields = dict(
                     stream_id=stream_id,
                     frame_index=detection["frame_index"],
                     class_name=obj["class"],
@@ -69,6 +90,12 @@ class DetectionConsumer:
                     bbox_x2=obj["bbox"]["x2"],
                     bbox_y2=obj["bbox"]["y2"],
                 )
+                # Явный None перезаписал бы server_default (now()) на NULL
+                # и получил бы NOT NULL violation — поэтому поле добавляем
+                # только когда время кадра действительно есть.
+                if captured_at is not None:
+                    fields["detected_at"] = captured_at
+                db_obj = StreamDetection(**fields)
                 db.add(db_obj)
             db.commit()
             logger.info(f"Saved {len(detection.get('objects', []))} detections for frame #{detection['frame_index']}")

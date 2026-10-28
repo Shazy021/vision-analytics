@@ -190,6 +190,9 @@ class YOLOConsumer:
             "stream_id": stream_id,
             "frame_index": data["frame_index"],
             "source": data["source"],
+            # Время захвата кадра сквозняком: инференс и очередь не должны
+            # сдвигать detected_at — writer поставит из него, не от now().
+            "captured_at": data.get("captured_at"),
             "objects": objects,
             "num_detections": len(objects),
         }).encode()

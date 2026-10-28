@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 import cv2
 from confluent_kafka import Producer
@@ -232,6 +233,11 @@ class FrameProducer:
                         "frame_index": frame_index,
                         "source": self.source,
                         "stream_id": self.stream_id,
+                        # Момент захвата кадра. detected_at в БД ставится от
+                        #сюда, а не от времени записи: при бэклоге (консьюмер
+                        # отставал/лежал) старые кадры не «омолаживаются» до
+                        # now(), и stream-activity показывает реальное время.
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
                     }).encode()
 
                     self.producer.produce(
