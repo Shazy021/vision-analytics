@@ -6,7 +6,7 @@ from confluent_kafka import Consumer
 
 from app.core.database import SessionLocal
 from app.core.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_DETECTIONS
-from app.db.models import Detection
+from app.db.models import StreamDetection
 
 # Настройка логгера (после импортов — E402)
 logging.basicConfig(
@@ -49,12 +49,18 @@ class DetectionConsumer:
             self.consumer.close()
 
     def _save_to_db(self, detection: dict):
+        # Топик detections — исключительно стримовый (видео пишут в БД
+        # напрямую из video-consumer), поэтому stream_id обязателен.
+        stream_id = detection.get("stream_id")
+        if stream_id is None:
+            logger.warning("Skipping detection without stream_id: %s", detection)
+            return
+
         db = SessionLocal()
         try:
             for obj in detection.get("objects", []):
-                db_obj = Detection(
-                    video_id=detection.get("video_id"),
-                    stream_id=detection.get("stream_id"),
+                db_obj = StreamDetection(
+                    stream_id=stream_id,
                     frame_index=detection["frame_index"],
                     class_name=obj["class"],
                     confidence=obj["confidence"],

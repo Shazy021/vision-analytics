@@ -5,7 +5,12 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app.core.config import settings
 from app.core.database import Base
-from app.db.models import Detection, Video  # noqa: F401 — импортируем чтобы Alembic их увидел
+from app.db.models import (  # noqa: F401 — импортируем чтобы Alembic их увидел
+    Stream,
+    StreamDetection,
+    Video,
+    VideoDetection,
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

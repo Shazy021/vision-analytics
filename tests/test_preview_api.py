@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from app.core.database import get_db
-from app.db.models import Detection, Stream, Video
+from app.db.models import Stream, StreamDetection, Video, VideoDetection
 from app.main import app
 
 
@@ -30,18 +30,18 @@ def client_with_video_detections(client):
     db.commit()
 
     detections = [
-        Detection(video_id=video.id, class_name="person", confidence=0.9,
-                  bbox_x1=10, bbox_y1=20, bbox_x2=50, bbox_y2=80,
-                  frame_index=0, timestamp=1.0),
-        Detection(video_id=video.id, class_name="person", confidence=0.85,
-                  bbox_x1=15, bbox_y1=25, bbox_x2=55, bbox_y2=85,
-                  frame_index=15, timestamp=1.5),
-        Detection(video_id=video.id, class_name="car", confidence=0.95,
-                  bbox_x1=100, bbox_y1=200, bbox_x2=300, bbox_y2=400,
-                  frame_index=30, timestamp=2.0),
-        Detection(video_id=video.id, class_name="car", confidence=0.8,
-                  bbox_x1=110, bbox_y1=210, bbox_x2=310, bbox_y2=410,
-                  frame_index=45, timestamp=5.0),
+        VideoDetection(video_id=video.id, class_name="person", confidence=0.9,
+                       bbox_x1=10, bbox_y1=20, bbox_x2=50, bbox_y2=80,
+                       frame_index=0, timestamp=1.0),
+        VideoDetection(video_id=video.id, class_name="person", confidence=0.85,
+                       bbox_x1=15, bbox_y1=25, bbox_x2=55, bbox_y2=85,
+                       frame_index=15, timestamp=1.5),
+        VideoDetection(video_id=video.id, class_name="car", confidence=0.95,
+                       bbox_x1=100, bbox_y1=200, bbox_x2=300, bbox_y2=400,
+                       frame_index=30, timestamp=2.0),
+        VideoDetection(video_id=video.id, class_name="car", confidence=0.8,
+                       bbox_x1=110, bbox_y1=210, bbox_x2=310, bbox_y2=410,
+                       frame_index=45, timestamp=5.0),
     ]
     db.add_all(detections)
     db.commit()
@@ -59,7 +59,7 @@ def client_with_stream_detections(client):
     db.commit()
 
     for frame_index in (10, 11, 12):
-        db.add(Detection(
+        db.add(StreamDetection(
             stream_id=stream.id,
             class_name="person",
             confidence=0.9,

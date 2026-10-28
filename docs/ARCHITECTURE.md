@@ -245,21 +245,43 @@ Three PostgreSQL tables (`app/db/models.py`), versioned with Alembic.
 | `uploaded_at` | datetime | server default `now()` |
 | `status` | varchar(20) | `processing` → `completed` / `partial` / `failed` |
 
-### `detections`
+### `video_detections`
+Detections of uploaded videos. Split from stream detections: lifecycle is
+tied to the file (cascade-deleted with the video), time system is seconds
+within the file.
+
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | int PK | |
-| `video_id` | int FK → `videos.id` | NULL for stream detections |
-| `stream_id` | int FK → `streams.id` | NULL for video detections |
+| `video_id` | int FK → `videos.id` | NOT NULL, `ON DELETE CASCADE` |
 | `frame_index` | int | frame key in MinIO |
 | `class_name` | varchar(50) | |
 | `confidence` | float | |
 | `bbox_x1/y1/x2/y2` | float | bounding box |
 | `timestamp` | float | seconds within the video file |
-| `detected_at` | datetime | wall-clock; valid for videos AND streams |
+| `detected_at` | datetime | wall-clock detection time |
 
-A detection belongs to EITHER a video OR a stream — the other FK is NULL.
-Indexed on `video_id`, `stream_id`, `class_name`, `detected_at`.
+Indexed on `(video_id, class_name)`, `(video_id, timestamp)`.
+
+### `stream_detections`
+Detections of RTSP streams. Accumulate forever (a camera is a permanent
+object), so retention is planned by age (`detected_at`), not source lifetime.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | int PK | |
+| `stream_id` | int FK → `streams.id` | NOT NULL, `ON DELETE CASCADE` |
+| `frame_index` | int | frame key in MinIO |
+| `class_name` | varchar(50) | |
+| `confidence` | float | |
+| `bbox_x1/y1/x2/y2` | float | bounding box |
+| `detected_at` | datetime | wall-clock detection time |
+
+Indexed on `(stream_id, class_name)`, `(stream_id, detected_at)`.
+
+Previously a single `detections` table with a nullable FK pair
+(`video_id` XOR `stream_id`); the split makes the "exactly one owner"
+invariant part of the schema (NOT NULL FK) and separates retention plans.
 
 ### `streams`
 | Column | Type | Notes |

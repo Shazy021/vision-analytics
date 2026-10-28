@@ -127,7 +127,7 @@ class TestDetectionConsumer:
 
     @patch("app.consumers.detections.SessionLocal")
     def test_save_to_db_creates_detection_objects(self, mock_session_cls):
-        """Проверяем что _save_to_db создаёт правильные Detection объекты"""
+        """Проверяем что _save_to_db создаёт правильные StreamDetection объекты"""
         mock_db = MagicMock()
         mock_session_cls.return_value = mock_db
 
@@ -144,12 +144,11 @@ class TestDetectionConsumer:
             ],
         }
 
-        with patch("app.consumers.detections.Detection") as mock_detection_cls:
+        with patch("app.consumers.detections.StreamDetection") as mock_detection_cls:
             consumer._save_to_db(detection)
 
-            # Проверяем что Detection создан с правильными параметрами
+            # Проверяем что StreamDetection создан с правильными параметрами
             mock_detection_cls.assert_called_once_with(
-                video_id=None,
                 stream_id=1,
                 frame_index=42,
                 class_name="person",
@@ -180,7 +179,7 @@ class TestDetectionConsumer:
             "objects": [{"class": "person", "confidence": 0.95, "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}}],
         }
 
-        with patch("app.consumers.detections.Detection"):
+        with patch("app.consumers.detections.StreamDetection"):
             consumer._save_to_db(detection)
 
             mock_db.rollback.assert_called_once()

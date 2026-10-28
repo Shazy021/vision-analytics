@@ -147,12 +147,12 @@ class FrameProducer:
             from sqlalchemy import func
 
             from app.core.database import SessionLocal
-            from app.db.models import Detection
+            from app.db.models import StreamDetection
 
             with SessionLocal() as db:
                 max_idx = (
-                    db.query(func.max(Detection.frame_index))
-                    .filter(Detection.stream_id == self.stream_id)
+                    db.query(func.max(StreamDetection.frame_index))
+                    .filter(StreamDetection.stream_id == self.stream_id)
                     .scalar()
                 )
             if max_idx:

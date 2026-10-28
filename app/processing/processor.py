@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core import storage
 from app.core.config import settings
-from app.db.models import Detection, Video
+from app.db.models import Video, VideoDetection
 from app.processing.detector import YOLODetector
 from app.processing.extractor import VideoCapture
 from app.processing.planner import allocate_sample_budgets, chunk_slot, plan_chunks
@@ -85,7 +85,7 @@ def process_video(video_id: int, db: Session) -> None:
     # ============================================================
     # Шаг 3: Ставим статус "processing"
     # ============================================================
-    db.query(Detection).filter(Detection.video_id == video_id).delete()
+    db.query(VideoDetection).filter(VideoDetection.video_id == video_id).delete()
     video.status = "processing"
     db.commit()
 
@@ -166,7 +166,7 @@ def process_video(video_id: int, db: Session) -> None:
         # Шаг 6: Сохраняем детекции в БД
         # ============================================================
         for det in all_detections:
-            db_detection = Detection(
+            db_detection = VideoDetection(
                 video_id=video.id,
                 class_name=det.class_name,
                 confidence=det.confidence,
@@ -340,14 +340,14 @@ def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session
         raise last_err
 
     # Идемпотентность: стираем собственный диапазон (redelivery-безопасно)
-    db.query(Detection).filter(
-        Detection.video_id == video_id,
-        Detection.timestamp >= start_s,
-        Detection.timestamp < end_s,
+    db.query(VideoDetection).filter(
+        VideoDetection.video_id == video_id,
+        VideoDetection.timestamp >= start_s,
+        VideoDetection.timestamp < end_s,
     ).delete(synchronize_session=False)
 
     for det in detections:
-        db.add(Detection(
+        db.add(VideoDetection(
             video_id=video.id,
             class_name=det.class_name,
             confidence=det.confidence,

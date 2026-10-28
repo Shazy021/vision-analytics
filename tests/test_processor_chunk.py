@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
-from app.db.models import Detection, Video
+from app.db.models import Video, VideoDetection
 from app.processing import processor
 from app.processing.processor import _decode_chunk, process_video_chunk
 
@@ -96,7 +96,7 @@ class TestProcessVideoChunk:
         """Redelivery чанка: мусор в собственном диапазоне стирается,
         дублей нет."""
         video = _make_video(db, six_second_video)
-        db.add(Detection(
+        db.add(VideoDetection(
             video_id=video.id, class_name="junk", confidence=0.5,
             bbox_x1=0, bbox_y1=0, bbox_x2=1, bbox_y2=1,
             frame_index=10, timestamp=1.0,
@@ -107,10 +107,10 @@ class TestProcessVideoChunk:
             process_video_chunk(video.id, 0.0, 3.0, db)
             process_video_chunk(video.id, 0.0, 3.0, db)  # redelivery
 
-        count = db.query(Detection).filter(
-            Detection.video_id == video.id,
-            Detection.timestamp >= 0.0,
-            Detection.timestamp < 3.0,
+        count = db.query(VideoDetection).filter(
+            VideoDetection.video_id == video.id,
+            VideoDetection.timestamp >= 0.0,
+            VideoDetection.timestamp < 3.0,
         ).count()
         assert count == 0  # мусор удалён, мок детекций не добавляет
 

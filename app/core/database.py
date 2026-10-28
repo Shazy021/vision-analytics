@@ -28,7 +28,7 @@ def get_db():
 
 def init_db():
     """Создаёт все таблицы по моделям (без Alembic)."""
-    from app.db.models import Detection, Video  # noqa: F401
+    from app.db.models import Stream, StreamDetection, Video, VideoDetection  # noqa: F401
     Base.metadata.create_all(bind=engine)
 
 

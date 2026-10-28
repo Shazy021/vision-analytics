@@ -86,52 +86,82 @@
         <mxCell id="28" value="pid&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="19">
           <mxGeometry x="0" y="222" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="29" value="detections" style="swimlane;startSize=30;collapsible=0;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=13;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
-          <mxGeometry x="520" y="200" width="280" height="318" as="geometry" />
+        <mxCell id="29" value="video_detections" style="swimlane;startSize=30;collapsible=0;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=13;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="520" y="60" width="280" height="294" as="geometry" />
         </mxCell>
         <mxCell id="30" value="&lt;b&gt;id&lt;/b&gt;&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer · PK&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="30" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="31" value="video_id&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer · &lt;/font&gt;&lt;font color=&quot;#9673a6&quot;&gt;&lt;b&gt;FK&lt;/b&gt;&lt;/font&gt;&lt;font color=&quot;#666666&quot;&gt; → videos.id&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="31" value="video_id&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer · NOT NULL · &lt;/font&gt;&lt;font color=&quot;#9673a6&quot;&gt;&lt;b&gt;FK&lt;/b&gt;&lt;/font&gt;&lt;font color=&quot;#666666&quot;&gt; → videos.id&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="54" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="32" value="stream_id&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer · &lt;/font&gt;&lt;font color=&quot;#9673a6&quot;&gt;&lt;b&gt;FK&lt;/b&gt;&lt;/font&gt;&lt;font color=&quot;#666666&quot;&gt; → streams.id&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="33" value="frame_index&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="78" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="33" value="frame_index&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="34" value="class_name&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;String(50)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="102" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="34" value="class_name&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;String(50)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="35" value="confidence&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="126" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="35" value="confidence&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="36" value="bbox_x1&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="150" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="36" value="bbox_x1&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="37" value="bbox_y1&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="174" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="37" value="bbox_y1&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="38" value="bbox_x2&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="198" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="38" value="bbox_x2&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="39" value="bbox_y2&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="222" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="39" value="bbox_y2&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="40" value="timestamp&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float · секунда от начала файла&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="246" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="40" value="timestamp&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
+        <mxCell id="41" value="detected_at&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;DateTime&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
           <mxGeometry x="0" y="270" width="280" height="24" as="geometry" />
         </mxCell>
-        <mxCell id="41" value="detected_at&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;DateTime&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="29">
-          <mxGeometry x="0" y="294" width="280" height="24" as="geometry" />
+        <mxCell id="45" value="stream_detections" style="swimlane;startSize=30;collapsible=0;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;fontSize=13;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="520" y="420" width="280" height="294" as="geometry" />
         </mxCell>
-        <mxCell id="42" value="ON DELETE CASCADE, ORM cascade=&quot;all, delete-orphan&quot;&#xa;detections.video_id / stream_id — оба nullable, заполнен ровно один&#xa;Индексы detections: video_id, stream_id, class_name, detected_at,&#xa;(video_id, class_name), (stream_id, class_name)" style="text;html=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fillColor=none;strokeColor=none;fontSize=11;fontColor=#666666;" vertex="1" parent="1">
-          <mxGeometry x="520" y="560" width="440" height="90" as="geometry" />
+        <mxCell id="46" value="&lt;b&gt;id&lt;/b&gt;&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer · PK&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="30" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="47" value="stream_id&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer · NOT NULL · &lt;/font&gt;&lt;font color=&quot;#9673a6&quot;&gt;&lt;b&gt;FK&lt;/b&gt;&lt;/font&gt;&lt;font color=&quot;#666666&quot;&gt; → streams.id&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="54" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="48" value="frame_index&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Integer&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="78" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="49" value="class_name&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;String(50)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="102" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="50" value="confidence&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="126" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="51" value="bbox_x1&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="150" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="52" value="bbox_y1&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="174" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="53" value="bbox_x2&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="198" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="54" value="bbox_y2&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;Float&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="222" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="55" value="detected_at&amp;nbsp;&amp;nbsp;&lt;font color=&quot;#666666&quot;&gt;DateTime · ретешн по возрасту&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;spacingLeft=10;overflow=hidden;fillColor=none;strokeColor=none;fontSize=12;" vertex="1" parent="45">
+          <mxGeometry x="0" y="246" width="280" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="42" value="ON DELETE CASCADE, ORM cascade=&quot;all, delete-orphan&quot;&#xa;video_detections умирают вместе с файлом; stream_detections&#xa;копятся, retention планируется по возрасту detected_at&#xa;Индексы: (video_id, class_name), (video_id, timestamp),&#xa;(stream_id, class_name), (stream_id, detected_at)" style="text;html=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fillColor=none;strokeColor=none;fontSize=11;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="520" y="730" width="440" height="90" as="geometry" />
         </mxCell>
         <mxCell id="43" value="1 : N" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;startArrow=ERone;endArrow=ERmany;startFill=0;endFill=0;strokeColor=#666666;fontSize=12;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="3" target="29">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="44" value="1 : N" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;startArrow=ERone;endArrow=ERmany;startFill=0;endFill=0;strokeColor=#666666;fontSize=12;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="19" target="29">
+        <mxCell id="44" value="1 : N" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;startArrow=ERone;endArrow=ERmany;startFill=0;endFill=0;strokeColor=#666666;fontSize=12;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="19" target="45">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
       </root>

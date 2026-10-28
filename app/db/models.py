@@ -44,18 +44,12 @@ class Video(Base):
     chunks_total = Column(Integer, nullable=True)
     chunks_done = Column(Integer, nullable=True)
 
-    # cascade: удаление Video автоматически удаляет его Detection
-    detections = relationship("Detection", back_populates="video", cascade="all, delete-orphan")
+    # cascade: удаление Video автоматически удаляет его детекции
+    detections = relationship("VideoDetection", back_populates="video", cascade="all, delete-orphan")
 
 
-class Detection(Base):
-    """Найденные объекты — общая таблица для видео и стримов."""
-    __tablename__ = "detections"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    video_id = Column(Integer, ForeignKey("videos.id", ondelete="CASCADE"), nullable=True)
-    stream_id = Column(Integer, ForeignKey("streams.id", ondelete="CASCADE"), nullable=True)
-
+class _DetectionMixin:
+    """Колонки, общие для обоих видов детекций (видео/стрим)."""
     frame_index = Column(Integer, nullable=False)
     class_name = Column(String(50), nullable=False)
     confidence = Column(Float, nullable=False)
@@ -63,22 +57,49 @@ class Detection(Base):
     bbox_y1 = Column(Float, nullable=False)
     bbox_x2 = Column(Float, nullable=False)
     bbox_y2 = Column(Float, nullable=False)
-
-    # ДВЕ системы времени: timestamp — секунда от начала файла (только видео),
-    # detected_at — реальное время детекции (работает и для файлов, и для стримов).
-    timestamp = Column(Float, nullable=True)
+    # Реальное время детекции — работает и для файлов, и для стримов
     detected_at = Column(DateTime, server_default=func.now(), nullable=False)
 
+
+class VideoDetection(_DetectionMixin, Base):
+    """Детекции загруженного видео.
+
+    Отдельная таблица (была общая detections с nullable-парой FK):
+    жизненный цикл привязан к файлу (умирает вместе с видео), а система
+    времени своя — timestamp в секундах от начала файла. NOT NULL-FOREIGN KEY
+    исключает «детекцию без владельца», которую допускала общая схема.
+    """
+    __tablename__ = "video_detections"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    video_id = Column(Integer, ForeignKey("videos.id", ondelete="CASCADE"), nullable=False)
+    # Секунда от начала файла (для стримов бессмысленна — там только detected_at)
+    timestamp = Column(Float, nullable=False)
+
     video = relationship("Video", back_populates="detections")
+
+    __table_args__ = (
+        Index("idx_video_detections_video_class", "video_id", "class_name"),
+        Index("idx_video_detections_video_ts", "video_id", "timestamp"),
+    )
+
+
+class StreamDetection(_DetectionMixin, Base):
+    """Детекции RTSP-стрима.
+
+    Копятся бесконечно (камера — постоянный объект, в отличие от файла),
+    поэтому retention планируется по возрасту, а не по жизни источника.
+    """
+    __tablename__ = "stream_detections"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stream_id = Column(Integer, ForeignKey("streams.id", ondelete="CASCADE"), nullable=False)
+
     stream = relationship("Stream", back_populates="detections")
 
     __table_args__ = (
-        Index("idx_detections_video_id", "video_id"),
-        Index("idx_detections_stream_id", "stream_id"),
-        Index("idx_detections_class", "class_name"),
-        Index("idx_detections_detected_at", "detected_at"),
-        Index("idx_detections_video_class", "video_id", "class_name"),
-        Index("idx_detections_stream_class", "stream_id", "class_name"),
+        Index("idx_stream_detections_stream_class", "stream_id", "class_name"),
+        Index("idx_stream_detections_stream_at", "stream_id", "detected_at"),
     )
 
 
@@ -114,4 +135,4 @@ class Stream(Base):
     created_at = Column(DateTime, server_default=func.now())
     pid = Column(Integer, nullable=True)
 
-    detections = relationship("Detection", back_populates="stream", cascade="all, delete-orphan")
+    detections = relationship("StreamDetection", back_populates="stream", cascade="all, delete-orphan")

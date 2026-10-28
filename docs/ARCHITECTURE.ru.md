@@ -243,21 +243,42 @@ Backoff от spawn-шторма: смерть считается крашем, �
 | `uploaded_at` | datetime | server default `now()` |
 | `status` | varchar(20) | `processing` → `completed` / `partial` / `failed` |
 
-### `detections`
+### `video_detections`
+Детекции загруженных видео. Отделены от стримовых: жизненный цикл привязан
+к файлу (умирают вместе с видео каскадом), система времени — секунда от начала файла.
+
 | Колонка | Тип | Примечание |
 |---------|-----|-----------|
 | `id` | int PK | |
-| `video_id` | int FK → `videos.id` | NULL для детекций стрима |
-| `stream_id` | int FK → `streams.id` | NULL для детекций видео |
+| `video_id` | int FK → `videos.id` | NOT NULL, `ON DELETE CASCADE` |
 | `frame_index` | int | ключ кадра в MinIO |
 | `class_name` | varchar(50) | |
 | `confidence` | float | |
 | `bbox_x1/y1/x2/y2` | float | ограничивающий бокс |
 | `timestamp` | float | секунда внутри видеофайла |
-| `detected_at` | datetime | реальное время; валидно и для видео, и для стримов |
+| `detected_at` | datetime | реальное время детекции |
 
-Детекция относится ИЛИ к видео, ИЛИ к стриму — второй FK равен NULL.
-Индексы: `video_id`, `stream_id`, `class_name`, `detected_at`.
+Индексы: `(video_id, class_name)`, `(video_id, timestamp)`.
+
+### `stream_detections`
+Детекции RTSP-стримов. Копятся бесконечно (камера — постоянный объект),
+поэтому retention планируется по возрасту (`detected_at`), а не по жизни источника.
+
+| Колонка | Тип | Примечание |
+|---------|-----|-----------|
+| `id` | int PK | |
+| `stream_id` | int FK → `streams.id` | NOT NULL, `ON DELETE CASCADE` |
+| `frame_index` | int | ключ кадра в MinIO |
+| `class_name` | varchar(50) | |
+| `confidence` | float | |
+| `bbox_x1/y1/x2/y2` | float | ограничивающий бокс |
+| `detected_at` | datetime | реальное время детекции |
+
+Индексы: `(stream_id, class_name)`, `(stream_id, detected_at)`.
+
+Раньше это была одна таблица `detections` с nullable-парой FK
+(`video_id` XOR `stream_id`); разделение сделало инвариант «ровно один
+владелец» частью схемы (NOT NULL FK) и развело retention-планы.
 
 ### `streams`
 | Колонка | Тип | Примечание |

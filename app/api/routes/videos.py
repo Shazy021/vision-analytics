@@ -15,7 +15,7 @@ from app.core import storage  # ← MinIO клиент (модуль, не кл�
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.topics import TOPIC_VIDEO_REQUESTS
-from app.db.models import Detection, Video
+from app.db.models import Video, VideoDetection
 from app.processing.planner import plan_chunks, probe_media, should_chunk
 from app.schemas.video import VideoCreate, VideoRead
 
@@ -222,8 +222,8 @@ def list_videos(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
 
     result = []
     for video in videos:
-        count = db.query(func.count(Detection.id)).filter(
-            Detection.video_id == video.id
+        count = db.query(func.count(VideoDetection.id)).filter(
+            VideoDetection.video_id == video.id
         ).scalar()
         video_dict = VideoRead.model_validate(video)
         video_dict.detections_count = count
@@ -254,8 +254,8 @@ def get_video(video_id: int, db: Session = Depends(get_db)):
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    count = db.query(func.count(Detection.id)).filter(
-        Detection.video_id == video_id
+    count = db.query(func.count(VideoDetection.id)).filter(
+        VideoDetection.video_id == video_id
     ).scalar()
 
     video_read = VideoRead.model_validate(video)
@@ -427,21 +427,21 @@ def video_detections(
     if closest_ts is not None:
         # Шаг 1: найти MAX(timestamp) WHERE timestamp <= closest_ts
         closest_row = (
-            db.query(Detection.timestamp)
+            db.query(VideoDetection.timestamp)
             .filter(
-                Detection.video_id == video_id,
-                Detection.timestamp <= closest_ts,
+                VideoDetection.video_id == video_id,
+                VideoDetection.timestamp <= closest_ts,
             )
-            .order_by(Detection.timestamp.desc())
+            .order_by(VideoDetection.timestamp.desc())
             .limit(1)
             .first()
         )
         if not closest_row:
             # Нет детекций раньше closest_ts — попробуем ближайший ПОСЛЕ
             closest_row = (
-                db.query(Detection.timestamp)
-                .filter(Detection.video_id == video_id)
-                .order_by(Detection.timestamp.asc())
+                db.query(VideoDetection.timestamp)
+                .filter(VideoDetection.video_id == video_id)
+                .order_by(VideoDetection.timestamp.asc())
                 .limit(1)
                 .first()
             )
@@ -450,10 +450,10 @@ def video_detections(
 
         target_ts = closest_row[0]
         detections = (
-            db.query(Detection)
+            db.query(VideoDetection)
             .filter(
-                Detection.video_id == video_id,
-                Detection.timestamp == target_ts,
+                VideoDetection.video_id == video_id,
+                VideoDetection.timestamp == target_ts,
             )
             .all()
         )
@@ -471,22 +471,22 @@ def video_detections(
         ]
 
     # Режим диапазона
-    query = db.query(Detection).filter(Detection.video_id == video_id)
+    query = db.query(VideoDetection).filter(VideoDetection.video_id == video_id)
 
     if start_ts is not None:
-        query = query.filter(Detection.timestamp >= start_ts)
+        query = query.filter(VideoDetection.timestamp >= start_ts)
     if end_ts is not None:
-        query = query.filter(Detection.timestamp <= end_ts)
+        query = query.filter(VideoDetection.timestamp <= end_ts)
 
     # Если фильтр по времени есть — сортируем по возрастанию timestamp
     # (боксы идут в естественном порядке, не «последние сверху»).
     # Иначе — последние N по времени.
     if start_ts is not None or end_ts is not None:
-        detections = query.order_by(Detection.timestamp.asc()).limit(max(limit, 500)).all()
+        detections = query.order_by(VideoDetection.timestamp.asc()).limit(max(limit, 500)).all()
     else:
         detections = (
             query
-            .order_by(Detection.timestamp.desc())
+            .order_by(VideoDetection.timestamp.desc())
             .limit(limit)
             .all()
         )
@@ -517,7 +517,7 @@ def delete_video(video_id: int, db: Session = Depends(get_db)):
         storage.delete_file(video.object_key)
 
     # Удаляем детекции + видео из БД
-    db.query(Detection).filter(Detection.video_id == video_id).delete()
+    db.query(VideoDetection).filter(VideoDetection.video_id == video_id).delete()
     db.delete(video)
     db.commit()
 

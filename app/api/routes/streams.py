@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core import storage
 from app.core.database import get_db
-from app.db.models import Detection, Stream
+from app.db.models import Stream, StreamDetection
 from app.schemas.stream import StreamCreate, StreamResponse
 
 router = APIRouter(prefix="/api/streams", tags=["streams"])
@@ -30,7 +30,7 @@ def list_streams(db: Session = Depends(get_db)):
     streams = db.query(Stream).all()
     result = []
     for s in streams:
-        count = db.query(Detection).filter(Detection.stream_id == s.id).count()
+        count = db.query(StreamDetection).filter(StreamDetection.stream_id == s.id).count()
         # status — это ФАКТ, который пишет stream_manager (reconciler).
         # API его только отдаёт наружу, сам не пересчитывает и не пишет:
         # раньше здесь был тест на живость Popen из памяти API — он и
@@ -209,8 +209,8 @@ def get_latest_stream_frame(stream_id: int, db: Session = Depends(get_db)):
 
     # Сколько детекций на этом кадре — пригодится для бейджа на превью
     det_count = (
-        db.query(Detection)
-        .filter(Detection.stream_id == stream_id, Detection.frame_index == latest_index)
+        db.query(StreamDetection)
+        .filter(StreamDetection.stream_id == stream_id, StreamDetection.frame_index == latest_index)
         .count()
     )
 
@@ -236,18 +236,18 @@ def stream_detections(
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    query = db.query(Detection).filter(Detection.stream_id == stream_id)
+    query = db.query(StreamDetection).filter(StreamDetection.stream_id == stream_id)
 
     # Если указан frame_index — возвращаем боксы ТОЛЬКО для этого кадра.
     # Это и есть «поднимаем детекции для последнего frame_index из БД».
     if frame_index is not None:
-        query = query.filter(Detection.frame_index == frame_index)
+        query = query.filter(StreamDetection.frame_index == frame_index)
         # Лимит не нужен: на один кадр обычно десятки боксов, не тысячи
         detections = query.all()
     else:
         detections = (
             query
-            .order_by(Detection.detected_at.desc())
+            .order_by(StreamDetection.detected_at.desc())
             .limit(limit)
             .all()
         )
