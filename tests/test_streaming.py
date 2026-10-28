@@ -46,8 +46,7 @@ class TestYOLOConsumer:
         __new__ создаёт объект, не вызывая конструктор. Обычный трюк
         для тестирования классов с тяжёлой инициализацией."""
         c = YOLOConsumer.__new__(YOLOConsumer)
-        c.model = MagicMock()
-        c.device = "cpu"
+        c.detector = MagicMock()
         c.producer = MagicMock()
         c.consumer = MagicMock()
         return c
@@ -88,7 +87,7 @@ class TestYOLOConsumer:
         """Липкая CUDA-ошибка — не poison message: процесс обязан выйти,
         иначе зомби-консумер вечно сжигает offset'ы мёртвым CUDA-контекстом."""
         consumer = self._make_consumer()
-        consumer.model.side_effect = RuntimeError("CUDA error: unknown error")
+        consumer.detector.detect.side_effect = RuntimeError("CUDA error: unknown error")
 
         def fake_poll(timeout):
             if not fake_poll.called:
@@ -108,7 +107,7 @@ class TestYOLOConsumer:
     def test_consecutive_failures_trigger_restart(self):
         """N подряд не-CUDA падений — тоже выход, а не бесконечный skip."""
         consumer = self._make_consumer()
-        consumer.model.side_effect = RuntimeError("boom")
+        consumer.detector.detect.side_effect = RuntimeError("boom")
 
         def fake_poll(timeout):
             return self._make_bad_msg()

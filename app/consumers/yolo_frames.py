@@ -14,7 +14,6 @@ import cv2
 import numpy as np
 from confluent_kafka import Consumer, Producer
 
-from app.core.config import settings
 from app.core.cuda import is_fatal_cuda_error
 from app.core.topics import (
     KAFKA_BOOTSTRAP_SERVERS,
@@ -62,9 +61,14 @@ class YOLOConsumer:
     """Читает raw_frames → YOLO → пишет в detections + сохраняет кадры в MinIO"""
 
     def __init__(self, model_path: str | None = None, device: str | None = None):
-        from ultralytics import YOLO
-        self.model = YOLO(model_path or settings.weights_path)
-        self.device = device or settings.device
+        # Ленивый импорт: YOLODetector тянет ultralytics/torch, а модуль
+        # импортируется и там, где инференс не нужен (тесты, линт).
+        # Тот же принцип, что с проверкой AcceleratorError по имени класса.
+        from app.processing.detector import YOLODetector
+        # Одна точка входа в инференс на всю платформу: видео-трасса
+        # (processor.py) и стримовая используют один и тот же YOLODetector —
+        # пороги и разбор боксов не разъедутся.
+        self.detector = YOLODetector(weights_path=model_path, device=device)
 
         self.consumer = Consumer({
             "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
@@ -160,22 +164,16 @@ class YOLOConsumer:
             cv2.IMREAD_COLOR,
         )
 
-        # YOLO
-        results = self.model(frame, device=self.device, verbose=False)[0]
-
-        objects = []
-        for box in results.boxes:
-            obj = {
-                "class": self.model.names[int(box.cls)],
-                "confidence": float(box.conf),
-                "bbox": {
-                    "x1": float(box.xyxy[0][0]),
-                    "y1": float(box.xyxy[0][1]),
-                    "x2": float(box.xyxy[0][2]),
-                    "y2": float(box.xyxy[0][3]),
-                },
+        # YOLO — разбор боксов общий с видео-трассой (YOLODetector)
+        detections = self.detector.detect(frame, frame_index=data["frame_index"])
+        objects = [
+            {
+                "class": d.class_name,
+                "confidence": d.confidence,
+                "bbox": {"x1": d.bbox[0], "y1": d.bbox[1], "x2": d.bbox[2], "y2": d.bbox[3]},
             }
-            objects.append(obj)
+            for d in detections
+        ]
 
         # Сохраняем чистый кадр в MinIO (ТОЛЬКО если есть детекции)
         stream_id = data.get("stream_id")
