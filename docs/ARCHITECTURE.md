@@ -10,6 +10,8 @@ Object detection system (YOLO) for:
 
 ## Architecture Overview
 
+![System architecture](diagrams/architecture.drawio.png)
+
 ### 1. Entry Point — `app/main.py`
 
 ```python
@@ -228,6 +230,8 @@ All support `source=video|stream` filter and `video_id` / `stream_id` filters.
 
 Three PostgreSQL tables (`app/db/models.py`), versioned with Alembic.
 
+![ER diagram](diagrams/erd.drawio.png)
+
 ### `videos`
 | Column | Type | Notes |
 |--------|------|-------|
@@ -330,6 +334,8 @@ pyproject.toml                  # Deps (PEP 621): base + extras gpu/dash/dev;
 ---
 
 ## Data Flow
+
+![Data flow](diagrams/dataflow.drawio.png)
 
 ### Path A: Uploaded Video
 

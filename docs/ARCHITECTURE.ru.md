@@ -10,6 +10,8 @@
 
 ## Обзор архитектуры
 
+![Архитектура системы](diagrams/architecture.drawio.png)
+
 ### 1. Точка входа — `app/main.py`
 
 ```python
@@ -226,6 +228,8 @@ Backoff от spawn-шторма: смерть считается крашем, �
 
 Три таблицы PostgreSQL (`app/db/models.py`), версии накатываются Alembic.
 
+![ER-диаграмма](diagrams/erd.drawio.png)
+
 ### `videos`
 | Колонка | Тип | Примечание |
 |---------|-----|-----------|
@@ -328,6 +332,8 @@ pyproject.toml                  # Зависимости (PEP 621): база + e
 ---
 
 ## Поток данных
+
+![Поток данных](diagrams/dataflow.drawio.png)
 
 ### Путь А: Загружаемое видео
 

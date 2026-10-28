@@ -16,6 +16,8 @@
 
 ## Стек
 
+<p align="center"><img src="docs/diagrams/architecture.drawio.png" alt="Архитектура платформы: API, Kafka, GPU-консьюмеры, PostgreSQL, MinIO"><br><em>Архитектура системы — подробности в <a href="docs/ARCHITECTURE.ru.md">доках</a> (<a href="docs/ARCHITECTURE.md">EN</a>).</em></p>
+
 - **API**: FastAPI, Pydantic, SQLAlchemy
 - **CV**: Ultralytics YOLOv8, OpenCV
 - **БД**: PostgreSQL, Alembic (миграции)
