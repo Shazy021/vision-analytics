@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.api.routes import analytics, streams, videos
 from app.core.database import init_db
@@ -59,6 +60,12 @@ app = FastAPI(
 app.include_router(videos.router)
 app.include_router(analytics.router)
 app.include_router(streams.router)
+
+# Prometheus-метрики HTTP (http_request_*): длительность и количество
+# запросов по маршрутам. Сервер у api уже есть (uvicorn на 8000) — метрики
+# отдаём тем же портом через /metrics, отдельный порт консьюмерского типа
+# не нужен.
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health")

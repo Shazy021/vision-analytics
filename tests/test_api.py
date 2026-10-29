@@ -149,7 +149,11 @@ def test_upload_publishes_task_to_kafka(client):
     assert response.status_code == 201
     topic, kwargs = producer.produce.call_args[0], producer.produce.call_args[1]
     assert topic[0] == TOPIC_VIDEO_REQUESTS
-    assert json.loads(kwargs["value"]) == {"video_id": 1}
+    payload = json.loads(kwargs["value"])
+    # enqueued_at — метка enqueue для queue-wait метрики (формат проверяется
+    # в test_metrics), здесь сверяем диспетчерскую часть payload
+    payload.pop("enqueued_at")
+    assert payload == {"video_id": 1}
     # Без flush сообщение осталось бы в локальном буфере продюсера
     producer.flush.assert_called_once()
 
@@ -171,6 +175,7 @@ def test_upload_long_video_publishes_chunk_tasks(client):
     # 300с / 30с = 10 чанков
     assert producer.produce.call_count == 10
     first = json.loads(producer.produce.call_args_list[0][1]["value"])
+    first.pop("enqueued_at")
     assert first == {"video_id": 1, "start_s": 0.0, "end_s": 30.0}
     last = json.loads(producer.produce.call_args_list[-1][1]["value"])
     assert last["start_s"] == 270.0

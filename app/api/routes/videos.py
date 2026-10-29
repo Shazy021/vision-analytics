@@ -4,6 +4,7 @@ import math
 import os
 import random
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -107,9 +108,14 @@ def _enqueue_video_tasks(tasks: list[dict]) -> None:
     n_partitions = max(1, len(md.topics[TOPIC_VIDEO_REQUESTS].partitions))
     base = random.randrange(n_partitions)
     for i, task in enumerate(tasks):
+        # enqueued_at: метка постановки задачи (UTC ISO). video-consumer по
+        # ней считает queue wait от момента ОТДАЧИ задачи API, а не от
+        # записи в брокер — задержка самого produce тоже входит в задержку
+        # трассы и должна быть видна.
+        payload = {**task, "enqueued_at": datetime.now(timezone.utc).isoformat()}
         producer.produce(
             TOPIC_VIDEO_REQUESTS,
-            value=json.dumps(task).encode(),
+            value=json.dumps(payload).encode(),
             partition=(base + i) % n_partitions,
         )
     producer.flush(timeout=5)

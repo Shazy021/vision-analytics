@@ -9,6 +9,7 @@ OpenCV (cv2.VideoCapture) поддерживает HTTP URL —
 """
 import logging
 import math
+import time
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,11 @@ from sqlalchemy.orm import Session
 
 from app.core import storage
 from app.core.config import settings
+from app.core.metrics import (
+    frame_chunk_decode_duration_seconds,
+    frame_chunk_inference_duration_seconds,
+    frame_chunk_write_duration_seconds,
+)
 from app.db.models import Video, VideoDetection
 from app.processing.detector import YOLODetector
 from app.processing.extractor import VideoCapture
@@ -202,11 +208,15 @@ def process_video(video_id: int, db: Session) -> None:
 
 def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
                   budget: int, detector: YOLODetector,
-                  on_sample=None) -> tuple[list, int, bool]:
+                  on_sample=None, timings: dict | None = None) -> tuple[list, int, bool]:
     """Декод одного чанка [start_s, end_s) с time-grid сэмплированием.
 
     on_sample(sampled_so_far) вызывается после каждого сэмпла — воркер
     показывает дашборду прогресс внутри чанка, а не только по его итогам.
+
+    timings — необязательный словарь: при успехе заполняется суммарными
+    seconds decode/inference чанка (для Prometheus-гистограмм). Словарь,
+    а не поля возврата: подпись функции зафиксирована тестами.
 
     Возвращает (детекции, число сэмплов, достигнут_ли_бюджет).
     Бросает RuntimeError, если поток оборвался ДО конца диапазона —
@@ -214,6 +224,8 @@ def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
     """
     detections: list = []
     sampled = 0
+    decode_s = 0.0
+    inference_s = 0.0
     with VideoCapture(source) as cap:
         fps = cap.get(5)
         if start_s > 0:
@@ -227,7 +239,12 @@ def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
 
         last_t = None
         while True:
+            # В decode идут ВСЕ cap.read(), включая preroll и кадры между
+            # сэмплами: это реальная стоимость декода чанка, а не только
+            # «полезных» кадров — иначе метрика недооценивала бы сеть/FFmpeg.
+            started = time.perf_counter()
             ret, frame = cap.read()
+            decode_s += time.perf_counter() - started
             if not ret:
                 break
             t_s = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
@@ -238,9 +255,11 @@ def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
                 break
             while next_mark <= last_mark and next_mark * interval <= t_s + _EPS_S:
                 frame_index = int(round(t_s * fps)) if fps > 0 else 0
+                started = time.perf_counter()
                 detections.extend(
                     detector.detect(frame, frame_index=frame_index, timestamp=t_s)
                 )
+                inference_s += time.perf_counter() - started
                 sampled += 1
                 next_mark += 1
                 if on_sample is not None:
@@ -258,6 +277,11 @@ def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
             f"Chunk [{start_s:.1f},{end_s:.1f}) ended early at {last_t}s — "
             "stream aborted before chunk end"
         )
+    if timings is not None:
+        # Только на успешном выходе: время упавшей попытки — не стоимость
+        # чанка, а стоимость ретрая.
+        timings["decode_s"] = decode_s
+        timings["inference_s"] = inference_s
     return detections, sampled, hit_budget
 
 
@@ -314,12 +338,13 @@ def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session
             db.commit()
             reported = sampled_so_far
 
+    timings: dict = {}
     for attempt in range(1, CHUNK_ATTEMPTS + 1):
         reported = 0
         try:
             detections, sampled, _hit = _decode_chunk(
                 video_source, start_s, end_s, interval, budget, detector,
-                on_sample=_report,
+                on_sample=_report, timings=timings,
             )
             last_err = None
             break
@@ -339,7 +364,11 @@ def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session
     if last_err is not None:
         raise last_err
 
+    frame_chunk_decode_duration_seconds.observe(timings.get("decode_s", 0.0))
+    frame_chunk_inference_duration_seconds.observe(timings.get("inference_s", 0.0))
+
     # Идемпотентность: стираем собственный диапазон (redelivery-безопасно)
+    write_started = time.perf_counter()
     db.query(VideoDetection).filter(
         VideoDetection.video_id == video_id,
         VideoDetection.timestamp >= start_s,
@@ -372,6 +401,9 @@ def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session
         )
     )
     db.commit()
+    # write = delete-range + вставка детекций + инкременты прогресса, всё
+    # до этого commit'а: это и есть стоимость записи чанка в PostgreSQL.
+    frame_chunk_write_duration_seconds.observe(time.perf_counter() - write_started)
 
     video = db.get(Video, video_id)
     if (video.chunks_total and video.chunks_done is not None

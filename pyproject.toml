@@ -50,6 +50,11 @@ dependencies = [
     # Kafka / S3
     "confluent-kafka==2.4.0",
     "minio==7.2.15",
+    # Observability: лёгкий клиент метрик (консьюмеры поднимают /metrics сами)
+    # + обвязка http_request_* для FastAPI. Чистый Python, без torch/GPU —
+    # модули с метриками импортируются в тестах.
+    "prometheus-client==0.21.1",
+    "prometheus-fastapi-instrumentator==7.0.0",
 ]
 
 [project.optional-dependencies]

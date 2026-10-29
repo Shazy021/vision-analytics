@@ -9,12 +9,23 @@ Phase 4: Сохраняем ЧИСТЫЕ кадры со стримов в MinIO
 import base64
 import json
 import logging
+import time
 
 import cv2
 import numpy as np
 from confluent_kafka import Consumer, Producer
 
 from app.core.cuda import is_fatal_cuda_error
+from app.core.metrics import (
+    frame_decode_duration_seconds,
+    frame_inference_duration_seconds,
+    frame_processed_total,
+    frame_queue_wait_seconds,
+    frames_received_total,
+    poison_messages_total,
+    queue_wait_seconds,
+    start_metrics_server,
+)
 from app.core.topics import (
     KAFKA_BOOTSTRAP_SERVERS,
     TOPIC_DETECTIONS,
@@ -122,6 +133,8 @@ class YOLOConsumer:
                 except Exception as exc:
                     self.poison_count += 1
                     self.consecutive_failures += 1
+                    frame_processed_total.labels(result="error").inc()
+                    poison_messages_total.inc()
                     topic_name = msg.topic()
                     offset = msg.offset()
                     if is_fatal_cuda_error(exc):
@@ -155,17 +168,29 @@ class YOLOConsumer:
             self.producer.flush()
 
     def _handle(self, msg):
+        # Ингресс считаем ДО разбора: ядовитое сообщение тоже прибыло —
+        # rate(frames_received_total) vs rate(frame_processed_total) и есть
+        # «едим ли мы свой вход».
+        frames_received_total.inc()
+        wait = queue_wait_seconds(msg)
+        if wait is not None:
+            frame_queue_wait_seconds.labels(topic=TOPIC_RAW_FRAMES).observe(wait)
+
         data = json.loads(msg.value().decode())
 
         # Декодируем кадр
         frame_bytes = base64.b64decode(data["frame_data"])
+        started = time.perf_counter()
         frame = cv2.imdecode(
             np.frombuffer(frame_bytes, dtype=np.uint8),
             cv2.IMREAD_COLOR,
         )
+        frame_decode_duration_seconds.observe(time.perf_counter() - started)
 
         # YOLO — разбор боксов общий с видео-трассой (YOLODetector)
+        started = time.perf_counter()
         detections = self.detector.detect(frame, frame_index=data["frame_index"])
+        frame_inference_duration_seconds.observe(time.perf_counter() - started)
         objects = [
             {
                 "class": d.class_name,
@@ -199,6 +224,7 @@ class YOLOConsumer:
 
         self.producer.produce(TOPIC_DETECTIONS, value=detection_msg)
         self.producer.poll(0)
+        frame_processed_total.labels(result="ok").inc()
         saved_text = (' → saved to MinIO' if saved else '')
         logger.debug(
             f"Frame #{data['frame_index']}: {len(objects)} detections{saved_text}",
@@ -207,6 +233,15 @@ class YOLOConsumer:
 
 if __name__ == "__main__":
     import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    # До загрузки модели: /metrics должен отвечать, пока YOLO ещё грузится
+    # в VRAM (путь к порту — METRICS_PORT, дефолт 9091, см. prometheus.yml).
+    start_metrics_server(9091)
 
     # Веса: аргумент CLI > WEIGHTS_PATH (settings). Без аргумента — None,
     # чтобы YOLOConsumer взял путь из настроек; fallback "yolov8n.pt" здесь
