@@ -312,6 +312,7 @@ app/
 │   ├── cuda.py                 # классификация липких CUDA-ошибок (консьюмеры)
 │   ├── database.py             # SQLAlchemy engine, SessionLocal, Base, get_db
 │   ├── storage.py              # MinIO клиент: upload, download, presigned, TTL
+│   ├── metrics.py              # Prometheus-метрики, helpers, start_metrics_server
 │   └── topics.py               # Имена Kafka топиков, bootstrap серверы
 ├── db/
 │   └── models.py               # SQLAlchemy: Video, Detection, Stream
@@ -338,6 +339,9 @@ app/
 alembic/                        # Миграции БД (alembic upgrade head)
 tests/                          # pytest: API, YOLO, extractor, streams, консьюмеры
 dashboard/                      # Streamlit приложение
+monitoring/                     # observability как код
+├── prometheus/prometheus.yml   #   таргеты; video-consumer — dns_sd per-replica
+└── grafana/provisioning/       #   datasource + дашборды JSON (правка = коммит)
 .github/workflows/              # CI (lint + test), Docker build
 docker-compose.yml              # Все сервисы (режим CPU)
 docker-compose.gpu.yml          # GPU overrides (NVIDIA)
@@ -409,6 +413,7 @@ DetectionConsumer: потребляет "detections" -> записывает с�
 | ML | Ultralytics YOLOv8 |
 | Медиа | OpenCV + FFmpeg |
 | Дашборд | Streamlit + Plotly |
+| Мониторинг | Prometheus + Grafana + kafka-exporter |
 | Линтинг | Ruff |
 | CI | GitHub Actions |
 
@@ -438,6 +443,9 @@ DetectionConsumer: потребляет "detections" -> записывает с�
 | `stream-manager` | vap-cpu | — | Reconciler: владеет процессами producer'ов |
 | `mediamtx` | bluenviron/mediamtx | 8554 | RTSP сервер (симуляция камеры) |
 | `minio` | minio/minio | 9000, 9001 | Объектное хранилище + веб-консоль |
+| `prometheus` | prom/prometheus | 9090 | Сбор метрик (pull, 15с), retention 7d |
+| `kafka-exporter` | danielqsj/kafka-exporter | 9308 | Лаги консьюмер-групп и размеры топиков |
+| `grafana` | grafana/grafana | 3000 | Дашборды (provisioning из monitoring/) |
 
 GPU: используй override-файл `docker-compose.gpu.yml` или `make up`
 (автоопределение через `nvidia-smi`).
@@ -445,6 +453,40 @@ GPU: используй override-файл `docker-compose.gpu.yml` или `make 
 CUDA-контекст не переживает `fork()`, поэтому каждый контейнер консьюмера
 выполняет инференс в главном процессе; параллелизм через `deploy.replicas: 2`
 (независимые контейнеры, Kafka раздаёт партиции `video_requests` между ними).
+
+---
+
+## Мониторинг
+
+Модель pull: каждый сервис сам отдаёт `GET /metrics` (prometheus_client),
+Prometheus скрейпит каждые 15с, Grafana рендерит PromQL. Конфиги — код в
+`monitoring/` (provisioning перезагружает дашборды за ~30с).
+
+| Экспортер | Порт | Что меряет |
+|-----------|------|-----------|
+| api | 8000 | HTTP-запросы/latency (prometheus-fastapi-instrumentator) |
+| yolo-consumer | 9091 | кадры: decode/inference/queue wait по `raw_frames`, poison |
+| detection-consumer | 9092 | запись детекций, очередь detections |
+| video-consumer | 9093 | трасса задачи: queue wait (от `enqueued_at` API), задача целиком, этапы чанка decode/inference/write (бакеты до 600с) |
+| kafka-exporter | 9308 | лаги групп, размеры топиков (считает брокер — всегда честно) |
+
+Дашборды: Pipeline Overview (здоровье), Streams Trace (+`stream_id`),
+Video Track (полная трасса + «накладные расходы» как регресс-гард тяжёлой
+инициализации), Infra (Kafka/API/процессы).
+
+**Per-replica скрейпинг.** `video-consumer` в 2+ репликах: одно DNS-имя
+резолвится round-robin, и один static-таргет чередовал бы счётчики реплик в
+одной серии (13/16/13/16) — Prometheus счёл бы каждый перепад сбросом
+счётчика, `rate()`/`increase()`/квантили нафантазировали бы задач в разы
+больше реальных. Лечится `dns_sd_configs type=A`: Docker DNS отдаёт все IP
+реплик по имени сервиса, Prometheus создаёт таргет на каждый. Дашборды
+агрегируют `sum()` / `sum by (le)` — суммарные графики остаются суммарными.
+(`tasks.<service>` для этого не нужен — это Swarm; в Compose хватает имени.)
+
+**Как читать квантили.** `rate(...[15m])` — скользящее окно: при простое
+линии затухают (память о последних задачах), а на редких данных квантиль
+шумит. Панель «Полная трасса» рисует объём окна (столбцы, правая ось):
+мало наблюдений — квантилю не верим.
 
 ---
 
@@ -489,6 +531,11 @@ CUDA-контекст не переживает `fork()`, поэтому каж�
 - Синхронизация правого («ведомого») плеера — drift-коррекция раз в 0.5 с
 
 ### Примечания по производительности
+- Модель YOLO грузится **один раз на процесс** консьюмера (ленивый кэш в
+  `processor._get_detector()`): загрузка весов в VRAM стоит 15-20с, а задач
+  (чанков) за жизнь процесса проходят десятки. Замеры по логам: первый чанк
+  на реплике 45.4с против 27-28с у последующих равных (900 сэмплов, ~5к
+  детекций); короткое видео 23.6с → 2.3с.
 - GPU обрабатывает батчи эффективнее, чем одиночные кадры
   (`detect_batch()` присутствует в коде, но пока не подключён к пайплайну)
 - Kafka `message.max.bytes`: 5 МБ (JPEG кадры в base64)
@@ -529,6 +576,8 @@ curl "http://localhost:8000/api/analytics/class-distribution?video_id=1"
 4. Проверить работоспособность: `curl http://localhost:8000/health`
 5. Открыть дашборд: http://localhost:8501
 6. Открыть консоль MinIO: http://localhost:9001 (minioadmin / minioadmin123)
+7. Открыть Grafana: http://localhost:3000 (дашборды в General) и Prometheus:
+   http://localhost:9090/query → Targets — все должны быть `up`
 
 
 Видео-плеер в дашборде ходит в MinIO напрямую из браузера — проверь, что
@@ -549,5 +598,7 @@ curl "http://localhost:8000/api/analytics/class-distribution?video_id=1"
 | Модели БД | `app/db/models.py` |
 | Конфигурация / переменные окружения | `app/core/config.py` |
 | Kafka топики | `app/core/topics.py` |
+| Prometheus-метрики | `app/core/metrics.py` |
+| Конфигурация мониторинга | `monitoring/` |
 | Миграции БД | `alembic/versions/` |
 ```

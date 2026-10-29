@@ -24,6 +24,7 @@
 - **Дашборд**: Streamlit, Plotly
 - **Очереди/события**: Kafka (KRaft), confluent-kafka
 - **RTSP**: MediaMTX
+- **Мониторинг**: Prometheus, Grafana, kafka-exporter
 - **Инфра**: Docker Compose, GPU passthrough, pytest
 
 ## Быстрый старт
@@ -38,7 +39,7 @@ cp .env.example .env
 docker-compose up -d
 ```
 
-Поднимутся 12 сервисов (13 контейнеров с учётом video-consumer ×2): db, minio, kafka, kafka-init (разовый — создаёт топики), api, dashboard, stream-manager, video-consumer (x2), yolo-consumer, detection-consumer, mediamtx.
+Поднимутся 14 сервисов (15 контейнеров с учётом video-consumer ×2): db, minio, kafka, kafka-init (разовый — создаёт топики), api, dashboard, stream-manager, video-consumer (x2), yolo-consumer, detection-consumer, mediamtx, prometheus, grafana, kafka-exporter.
 
 <p align="center"><img src="demos/docker-compose-ps.png" alt="Docker Desktop: все сервисы стека подняты"><br><em><code>kafka-init</code> в сером статусе — это норма: разовый контейнер создал топики и штатно завершился.</em></p>
 
@@ -86,6 +87,8 @@ docker-compose up -d
 | API | http://localhost:8000 |
 | Swagger | http://localhost:8000/docs |
 | Dashboard | http://localhost:8501 |
+| Grafana | http://localhost:3000 (дашборды в General, anonymous Viewer) |
+| Prometheus | http://localhost:9090 |
 
 ### Загрузка видео
 
@@ -163,6 +166,30 @@ MediaMTX — приёмник, он сам видео не генерирует.
 ```bash
 ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
 ```
+
+### Мониторинг
+
+Стек observability поднимается вместе со всеми (`monitoring/` — конфиги в репо):
+
+| Компонент | Адрес | Что смотреть |
+|-----------|-------|--------------|
+| Grafana | http://localhost:3000 | Дашборды в папке General (provisioning) |
+| Prometheus | http://localhost:9090 | Targets, raw-запросы |
+| `/metrics` консьюмеров | внутри сети :9091/:9092/:9093 | api — на своём :8000 (instrumentator) |
+
+Дашборды: **Pipeline Overview** (здоровье всего тракта), **Streams Trace** (стримы,
+есть переменная `stream_id`), **Video Track** (полная трасса видео-задачи:
+queue wait → задача целиком → этапы чанка decode/inference/write), **Infra**
+(Kafka-лаги, API, процессы).
+
+Как читать: квантили считаются по скользящему окну 15м — при простое графики
+затухают, это память о последних задачах, а не активность. На «Полной трассе»
+серые столбцы (правая ось) — число задач в окне: где их мало, квантилю верить
+нельзя. Лаг `video-workers` считается брокером и всегда честный.
+
+> 📡 video-consumer скрейпится **per-replica** (`dns_sd type=A`): один таргет на
+> round-robin DNS-имя сервиса склеивал счётчики двух реплик в одну серию, и
+> `rate()`/квантили рисовали фантомные задачи. Конфиг — `monitoring/prometheus/prometheus.yml`.
 
 ### Локально (без Docker)
 
@@ -264,6 +291,8 @@ pre-commit install
 | MediaMTX | `mediamtx:8554` | `localhost:8554` |
 | FastAPI | `api:8000` | `localhost:8000` |
 | MinIO (S3 API) | `minio:9000` | `localhost:9000` |
+| Prometheus | `prometheus:9090` | `localhost:9090` |
+| Grafana | `grafana:3000` | `localhost:3000` |
 
 ## Kafka Topics
 
@@ -280,7 +309,7 @@ Kafka — транспорт, не хранилище. Все детекции �
 ```
 ├── app/
 │   ├── api/routes/          # API endpoints (videos, streams, analytics)
-│   ├── core/                # Config, database, storage, Kafka topics, CUDA utils
+│   ├── core/                # Config, database, storage, Kafka topics, CUDA utils, metrics
 │   ├── db/models.py         # SQLAlchemy models (Video, Stream, Detection)
 │   ├── schemas/             # Pydantic schemas
 │   ├── processing/          # Обработка видео: processor, detector, extractor
@@ -292,9 +321,12 @@ Kafka — транспорт, не хранилище. Все детекции �
 │   └── main.py              # FastAPI entry point
 ├── dashboard/
 │   └── app.py               # Streamlit dashboard
+├── monitoring/
+│   ├── prometheus/          # prometheus.yml: таргеты, dns_sd per-replica
+│   └── grafana/             # provisioning: datasource + дашборды как код
 ├── alembic/                 # Database migrations
 ├── tests/                   # Test suite
-├── docker-compose.yml       # 12 services (kafka-init — разовый)
+├── docker-compose.yml       # 14 services (kafka-init — разовый)
 ├── Dockerfile               # CUDA-образ: video-consumer, yolo-consumer (инференс)
 ├── Dockerfile.cpu           # CPU-образ: api, detection-consumer, stream-manager, dashboard
 └── pyproject.toml           # зависимости (PEP 621): база + extras gpu/dash/dev

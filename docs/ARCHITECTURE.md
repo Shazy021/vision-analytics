@@ -315,6 +315,7 @@ app/
 │   ├── cuda.py                 # sticky CUDA error classification (consumers)
 │   ├── database.py             # SQLAlchemy engine, SessionLocal, Base, get_db
 │   ├── storage.py              # MinIO client: upload, download, presigned, TTL
+│   ├── metrics.py              # Prometheus metrics, helpers, start_metrics_server
 │   └── topics.py               # Kafka topic names, bootstrap servers
 ├── db/
 │   └── models.py               # SQLAlchemy: Video, Detection, Stream
@@ -341,6 +342,9 @@ app/
 alembic/                        # DB migrations (alembic upgrade head)
 tests/                          # pytest: API, YOLO, extractor, streams, consumers
 dashboard/                      # Streamlit app
+monitoring/                     # observability as code
+├── prometheus/prometheus.yml   #   targets; video-consumer via dns_sd per-replica
+└── grafana/provisioning/       #   datasource + dashboards as JSON (edit = commit)
 .github/workflows/              # CI (lint + test), Docker build
 docker-compose.yml              # All services (CPU mode)
 docker-compose.gpu.yml          # GPU overrides (NVIDIA)
@@ -412,6 +416,7 @@ Dashboard: GET /api/streams/{id}/detections + /api/analytics/stream-activity
 | ML | Ultralytics YOLOv8 |
 | Media | OpenCV + FFmpeg |
 | Dashboard | Streamlit + Plotly |
+| Observability | Prometheus + Grafana + kafka-exporter |
 | Linting | Ruff |
 | CI | GitHub Actions |
 
@@ -441,6 +446,9 @@ Services in `docker-compose.yml`:
 | `stream-manager` | vap-cpu | — | Reconciler: owns producer subprocesses |
 | `mediamtx` | bluenviron/mediamtx | 8554 | RTSP server (camera simulation) |
 | `minio` | minio/minio | 9000, 9001 | Object storage + web console |
+| `prometheus` | prom/prometheus | 9090 | Metric collection (pull, 15s), 7d retention |
+| `kafka-exporter` | danielqsj/kafka-exporter | 9308 | Consumer-group lag, topic sizes |
+| `grafana` | grafana/grafana | 3000 | Dashboards (provisioned from monitoring/) |
 
 GPU: use `docker-compose.gpu.yml` override or `make up` (auto-detects via `nvidia-smi`).
 
@@ -448,6 +456,40 @@ CUDA context does not survive `fork()`, so each consumer container runs
 inference in its main process; parallelism via `deploy.replicas: 2`
 (independent containers, Kafka distributes `video_requests` partitions
 between them).
+
+---
+
+## Observability
+
+Pull model: every service exposes `GET /metrics` (prometheus_client),
+Prometheus scrapes every 15s, Grafana renders PromQL. Configs live in
+`monitoring/` as code (provisioning reloads dashboards in ~30s).
+
+| Exporter | Port | What it measures |
+|----------|------|------------------|
+| api | 8000 | HTTP requests/latency (prometheus-fastapi-instrumentator) |
+| yolo-consumer | 9091 | frames: decode/inference/queue wait on `raw_frames`, poison |
+| detection-consumer | 9092 | detection writes, detections queue |
+| video-consumer | 9093 | task trace: queue wait (from API `enqueued_at`), task total, chunk stages decode/inference/write (buckets up to 600s) |
+| kafka-exporter | 9308 | group lag, topic sizes (computed by the broker — always honest) |
+
+Dashboards: Pipeline Overview (health), Streams Trace (+`stream_id`),
+Video Track (full trace + "overhead" panel as a regression guard for heavy
+per-task init), Infra (Kafka/API/processes).
+
+**Per-replica scraping.** video-consumer runs 2+ replicas: one DNS name
+resolves round-robin, so a single static target interleaved the replicas'
+counters into one series (13/16/13/16). Prometheus treats each drop as a
+counter reset, and `rate()`/`increase()`/quantiles then invent far more
+tasks than ever ran. Fix: `dns_sd_configs type=A` — Docker DNS returns every
+replica IP for the service name, Prometheus scrapes each separately.
+Dashboards aggregate with `sum()` / `sum by (le)`, so totals stay totals.
+(`tasks.<service>` is not needed — that's Swarm; Compose resolves the name.)
+
+**Reading quantiles.** `rate(...[15m])` is a sliding window: lines decay
+when idle (memory of recent tasks), and quantiles are noisy on sparse data.
+The Full-trace panel draws window volume (bars, right axis): few
+observations — don't trust the quantile.
 
 ---
 
@@ -491,6 +533,11 @@ between them).
 - The right ("follower") player is kept in sync via drift correction every 0.5 s
 
 ### Performance notes
+- The YOLO model loads **once per consumer process** (lazy cache in
+  `processor._get_detector()`): loading weights into VRAM costs 15-20s while
+  dozens of tasks (chunks) pass through a process lifetime. Log-measured:
+  first chunk on a replica 45.4s vs 27-28s for equal later chunks (900
+  samples, ~5k detections); a short video 23.6s -> 2.3s.
 - GPU processes batches more efficiently than single frames
   (`detect_batch()` exists in code but is not yet wired into the pipeline)
 - Kafka `message.max.bytes`: 5 MB (JPEG frames in base64)
@@ -531,6 +578,8 @@ curl "http://localhost:8000/api/analytics/class-distribution?video_id=1"
 4. Verify health: `curl http://localhost:8000/health`
 5. Open dashboard: http://localhost:8501
 6. Open MinIO console: http://localhost:9001 (minioadmin / minioadmin123)
+7. Open Grafana: http://localhost:3000 (dashboards in General) and Prometheus
+   http://localhost:9090/query -> Targets — all should be `up`
 
 The dashboard video player reaches MinIO directly from the browser — make sure
 `S3_PUBLIC_ENDPOINT` (default `http://localhost:9000`) is reachable from the
@@ -550,4 +599,6 @@ machine where the dashboard is opened.
 | DB models | `app/db/models.py` |
 | Config / env vars | `app/core/config.py` |
 | Kafka topics | `app/core/topics.py` |
+| Prometheus metrics | `app/core/metrics.py` |
+| Monitoring config | `monitoring/` |
 | DB migrations | `alembic/versions/` |
