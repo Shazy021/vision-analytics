@@ -1,0 +1,12 @@
+# Datasource Prometheus — Grafana только рисует то, что уже собрал
+# Prometheus; адрес — docker-DNS имя сервиса из compose.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

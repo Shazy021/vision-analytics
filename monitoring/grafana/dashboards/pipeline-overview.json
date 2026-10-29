@@ -1,0 +1,132 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "tags": ["pipeline", "vision-analytics"],
+  "timezone": "utc",
+  "title": "Pipeline Overview",
+  "uid": "pipeline-overview",
+  "version": 2,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "description": "Пожарный вид: горит или нет. Drill-down — на дашбордах Streams, Video Track, Infra.",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Throughput по стадиям (frames/s)",
+      "description": "Вход в raw_frames (по приросту offsets топика), обработка yolo и запись writer'ом. Разрыв между линиями — где копится бэклог.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"raw_frames\"}[1m]))", "legendFormat": "producer → raw_frames" },
+        { "refId": "B", "expr": "sum(rate(frame_processed_total{result=\"ok\"}[1m]))", "legendFormat": "yolo ok" },
+        { "refId": "C", "expr": "sum(rate(frame_written_total{result=\"ok\"}[1m]))", "legendFormat": "writer ok" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Kafka consumer lag по группам",
+      "description": "Главная «успеваемость»: растущий лаг = консьюмер не съедает вход.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=~\"yolo-workers|detection-writer|video-workers\"})",
+          "legendFormat": "{{consumergroup}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "E2E стрима: захват кадра → запись в БД",
+      "description": "frame_e2e_latency_seconds по captured_at: вся трасса producer → Kafka → yolo → Kafka → writer. Разложение по этапам — на дашборде Streams.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(frame_e2e_latency_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_e2e_latency_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(frame_e2e_latency_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Ошибки: poison и result != ok",
+      "description": "Ядовитые сообщения yolo и нестандартные исходы стадий. writer missing_ts = кадры без валидного captured_at.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(poison_messages_total[5m]))", "legendFormat": "yolo poison/s" },
+        { "refId": "B", "expr": "sum(rate(frame_processed_total{result=\"error\"}[5m]))", "legendFormat": "yolo error/s" },
+        { "refId": "C", "expr": "sum by (result) (rate(frame_written_total{result!=\"ok\"}[5m]))", "legendFormat": "writer {{result}}" },
+        { "refId": "D", "expr": "sum(rate(frame_task_completed_total{status=\"failed\"}[5m]))", "legendFormat": "video failed/s" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Poison за окно",
+      "description": "Сумма пропущенных ядовитых сообщений yolo-consumer за выбранное время.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(poison_messages_total[$__range]))", "legendFormat": "poison" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Видео-задачи failed за окно",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(frame_task_completed_total{status=\"failed\"}[$__range]))", "legendFormat": "failed" }
+      ]
+    }
+  ]
+}

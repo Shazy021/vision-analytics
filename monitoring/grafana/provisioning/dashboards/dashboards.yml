@@ -1,0 +1,14 @@
+# Поставщик дашбордов: JSON из ./monitoring/grafana/dashboards монтируется
+# в контейнер и подхватывается без ручного импорта через UI.
+apiVersion: 1
+
+providers:
+  - name: pipeline
+    orgId: 1
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

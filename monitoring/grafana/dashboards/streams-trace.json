@@ -1,0 +1,153 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "tags": ["pipeline", "streams"],
+  "timezone": "utc",
+  "title": "Streams — полная трасса",
+  "uid": "streams-trace",
+  "version": 1,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "description": "Где именно тормозит стрим: разложение e2e на этапы. stream_id действует только на e2e-панели — остальные метрики глобальные (решение по кардинальности), и это честно: decode/inference/очереди — общий ресурс всех стримов.",
+  "templating": {
+    "list": [
+      {
+        "name": "stream_id",
+        "label": "Стрим",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(frame_e2e_latency_seconds_count, stream_id)", "refId": "stream_id_var" },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": { "text": ["All"], "value": ["$__all"] },
+        "sort": 3
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Этапы трассы p95",
+      "description": "Каждый этап стримовой трассы отдельной линией: очередь raw_frames, decode, inference, очередь detections, запись. e2e — сумма этапов плюс захват/продюс/сеть до брокера, поэтому чуть выше слагаемых. Сумма p95 ≠ p95 e2e: квантили не аддитивны.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "e2e (всего)" }, "properties": [ { "id": "custom.lineWidth", "value": 2 } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_queue_wait_seconds_bucket{topic=\"raw_frames\"}[5m])))", "legendFormat": "queue raw_frames" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_decode_duration_seconds_bucket[5m])))", "legendFormat": "decode" },
+        { "refId": "C", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_inference_duration_seconds_bucket[5m])))", "legendFormat": "inference" },
+        { "refId": "D", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_queue_wait_seconds_bucket{topic=\"detections\"}[5m])))", "legendFormat": "queue detections" },
+        { "refId": "E", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_write_duration_seconds_bucket[5m])))", "legendFormat": "write DB" },
+        { "refId": "F", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_e2e_latency_seconds_bucket{stream_id=~\"$stream_id\"}[5m])))", "legendFormat": "e2e (всего)" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Бюджет времени этапов (среднее)",
+      "description": "Средняя длительность этапа (rate(sum)/rate(count)). В отличие от p95 слагаемые здесь складываются в e2e — видно, куда реально уходит время: очередь, GPU или БД.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(frame_queue_wait_seconds_sum{topic=\"raw_frames\"}[5m])) / sum(rate(frame_queue_wait_seconds_count{topic=\"raw_frames\"}[5m]))", "legendFormat": "queue raw_frames" },
+        { "refId": "B", "expr": "sum(rate(frame_decode_duration_seconds_sum[5m])) / sum(rate(frame_decode_duration_seconds_count[5m]))", "legendFormat": "decode" },
+        { "refId": "C", "expr": "sum(rate(frame_inference_duration_seconds_sum[5m])) / sum(rate(frame_inference_duration_seconds_count[5m]))", "legendFormat": "inference" },
+        { "refId": "D", "expr": "sum(rate(frame_queue_wait_seconds_sum{topic=\"detections\"}[5m])) / sum(rate(frame_queue_wait_seconds_count{topic=\"detections\"}[5m]))", "legendFormat": "queue detections" },
+        { "refId": "E", "expr": "sum(rate(frame_write_duration_seconds_sum[5m])) / sum(rate(frame_write_duration_seconds_count[5m]))", "legendFormat": "write DB" },
+        { "refId": "F", "expr": "sum(rate(frame_e2e_latency_seconds_sum{stream_id=~\"$stream_id\"}[5m])) / sum(rate(frame_e2e_latency_seconds_count{stream_id=~\"$stream_id\"}[5m]))", "legendFormat": "e2e (всего)" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "E2E p50/p95/p99 (выбранные стримы)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(frame_e2e_latency_seconds_bucket{stream_id=~\"$stream_id\"}[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_e2e_latency_seconds_bucket{stream_id=~\"$stream_id\"}[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(frame_e2e_latency_seconds_bucket{stream_id=~\"$stream_id\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "E2E p95 по стримам",
+      "description": "Линия на стрим: «тормозит только камера №3» видно здесь. При All и множестве стримов панель шумит — выбирайте конкретные.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, stream_id) (rate(frame_e2e_latency_seconds_bucket{stream_id=~\"$stream_id\"}[5m])))",
+          "legendFormat": "stream {{stream_id}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Queue wait p95 по топикам",
+      "description": "Сколько сообщение лежит в топике до выдачи консьюмеру: backlog предыдущей стадии.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, topic) (rate(frame_queue_wait_seconds_bucket[5m])))", "legendFormat": "{{topic}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Decode и Inference p50/p95/p99",
+      "description": "Decode = imdecode кадра; inference = detector.detect(). Деградация p99 при неизменном p50 — первый признак проблем GPU.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(frame_decode_duration_seconds_bucket[5m])))", "legendFormat": "decode p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_decode_duration_seconds_bucket[5m])))", "legendFormat": "decode p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(frame_decode_duration_seconds_bucket[5m])))", "legendFormat": "decode p99" },
+        { "refId": "D", "expr": "histogram_quantile(0.5, sum by (le) (rate(frame_inference_duration_seconds_bucket[5m])))", "legendFormat": "inference p50" },
+        { "refId": "E", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_inference_duration_seconds_bucket[5m])))", "legendFormat": "inference p95" },
+        { "refId": "F", "expr": "histogram_quantile(0.99, sum by (le) (rate(frame_inference_duration_seconds_bucket[5m])))", "legendFormat": "inference p99" }
+      ]
+    }
+  ]
+}

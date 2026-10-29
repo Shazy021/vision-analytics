@@ -329,6 +329,74 @@ services:
       timeout: 5s
       retries: 5
 
+  # ============================================================
+  # Observability — Prometheus + Kafka exporter + Grafana
+  #
+  # Консьюмеры отдают /metrics сами (start_metrics_server в процессах),
+  # Prometheus раз в 15с обходит все таргеты и складывает значения в TSDB
+  # (retention 7d), Grafana рендерит PromQL-запросы из Prometheus.
+  # Конфиги — в monitoring/ (версионируются в репо, правка = коммит).
+  #
+  # video-consumer работает в N репликах: Prometheus открывает на каждую
+  # отдельный таргет (dns_sd type=A, см. monitoring/prometheus) — иначе
+  # round-robin DNS склеивает счётчики реплик в одну серию и rate()/
+  # квантили врут. Суммарные графики в Grafana даёт sum()/sum by (le).
+  # ============================================================
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      # POST /api/v1/admin/tsdb/delete_series — штатная зачистка серий
+      # (пригодилась после фикса скрейпинга: вычистить историю старого
+      # round-robin таргета). Без auth, поэтому порт торчит только в
+      # localhost-интерфейс, не в LAN.
+      - --web.enable-admin-api
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - kafka-exporter
+
+  kafka-exporter:
+    # Лаг консьюмер-групп и размеры топиков: kafka_exporter читает
+    # committed offsets брокера, своих настроек по группам не требует —
+    # экспортирует все группы, нужные отфильтрованы в Grafana-запросах.
+    # ВНИМАНИЕ: имя образа на Hub — через дефис (kafka-exporter), репозиторий
+    # с подчёркиванием (kafka_exporter) удалён; тег v2.0.0 не существует,
+    # актуальная линейка — v1.x.
+    image: danielqsj/kafka-exporter:v1.11.0
+    command: ["--kafka.server=kafka:29092"]
+    ports:
+      - "9308:9308"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      # Анонимный доступ — только просмотр: открыть дашборд можно без
+      # регистрации, что удобно для демо и локальной разработки.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      # Provisioning из репо: datasource и дашборд подхватываются при
+      # старте — ничего не нужно кликать руками в UI.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
   minio_data:
+  prometheus_data:
+  grafana_data:

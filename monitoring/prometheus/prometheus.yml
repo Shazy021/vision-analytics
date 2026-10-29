@@ -1,0 +1,49 @@
+# ============================================================
+# Prometheus — сбор метрик пайплайна видеоналитики.
+#
+# Модель: pull. Каждый сервис отдаёт plain HTTP /metrics, Prometheus
+# приходит сам каждые 15 секунд и складывает значения в свой TSDB
+# (retention 7d задаётся флагом в docker-compose.yml).
+#
+# Таргеты — docker-DNS имена сервисов из compose; порты консьюмеров —
+# дефолты start_metrics_server (METRICS_PORT в compose не переопределяется,
+# иначе таргеты разъедутся с реальными портами).
+#
+# api скрейпится на :8000 — prometheus-fastapi-instrumentator вешает
+# /metrics на порт самого приложения, отдельный порт api не поднимает.
+# ============================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: ["api:8000"]
+
+  - job_name: yolo-consumer
+    static_configs:
+      - targets: ["yolo-consumer:9091"]
+
+  - job_name: detection-consumer
+    static_configs:
+      - targets: ["detection-consumer:9092"]
+
+  # video-consumer масштабируется репликами: один static-таргет на DNS-имя
+  # сервиса давал round-robin — Prometheus читал то одну, то другую реплику
+  # как ОДИН процесс, счётчики чередовались (13/16/13/16), и rate()/
+  # increase()/квантили рисовали фантомные задачи. dns_sd type=A спрашивает
+  # Docker DNS один раз и получает ВСЕ IP реплик → отдельный таргет и своя
+  # серия на каждую; Grafana суммирует их sum()/sum by (le). При --scale
+  # ничего править не надо. (tasks.<service> для этого не нужен — это Swarm;
+  # в Compose обычное имя сервиса уже отдаёт все A-записи.)
+  - job_name: video-consumer
+    dns_sd_configs:
+      - names: ["video-consumer"]
+        type: "A"
+        port: 9093
+        refresh_interval: 15s
+
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ["kafka-exporter:9308"]

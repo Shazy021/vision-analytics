@@ -1,0 +1,172 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "tags": ["pipeline", "video"],
+  "timezone": "utc",
+  "title": "Video Track",
+  "uid": "video-track",
+  "version": 2,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "description": "Почему задача на видео долго: полная трасса queue wait → задача целиком → этапы чанка. Задачи редкие и минутные — при простое графики затухают, это норма (квантили считаются по окну 15м от последних событий).",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Полная трасса задачи p95",
+      "description": "queue wait (от enqueue API) и полная длительность задачи от выдачи до конца. decode/inference/write — этапы чанка; задача целиком больше их суммы на накладные (presigned URL, seek; модель — синглтон на процесс, грузится один раз). Для одиночных (не чанковых) задач этапных метрик нет — только task total. Серые столбцы (правая ось) — задачи/сек в окне: там, где их почти нет, квантиль считается по 1-2 сэмплам и верить ему нельзя.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "задача целиком" }, "properties": [ { "id": "custom.lineWidth", "value": 2 } ] },
+          {
+            "matcher": { "id": "byName", "options": "наблюдений/сек" },
+            "properties": [
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.drawStyle", "value": "bars" },
+              { "id": "custom.lineWidth", "value": 6 },
+              { "id": "custom.fillOpacity", "value": 45 },
+              { "id": "unit", "value": "reqps" },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "rgb(110, 110, 110)" } }
+            ]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_task_queue_wait_seconds_bucket[15m])))", "legendFormat": "queue wait (от API)" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_task_duration_seconds_bucket[15m])))", "legendFormat": "задача целиком" },
+        { "refId": "C", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_chunk_decode_duration_seconds_bucket[15m])))", "legendFormat": "chunk decode" },
+        { "refId": "D", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_chunk_inference_duration_seconds_bucket[15m])))", "legendFormat": "chunk inference" },
+        { "refId": "E", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_chunk_write_duration_seconds_bucket[15m])))", "legendFormat": "chunk write" },
+        { "refId": "F", "expr": "sum(rate(frame_task_duration_seconds_count[15m]))", "legendFormat": "наблюдений/сек" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Очередь задач (dequeue − enqueued_at API)",
+      "description": "От отдачи задачи API до выдачи консьюмеру: ждёт свободной реплики + время produce. Сообщения старых версий API без enqueued_at сюда не попадают.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_task_queue_wait_seconds_bucket[15m])))", "legendFormat": "p95" },
+        { "refId": "B", "expr": "histogram_quantile(0.5, sum by (le) (rate(frame_task_queue_wait_seconds_bucket[15m])))", "legendFormat": "p50" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Накладные расходы задачи (среднее)",
+      "description": "Задача целиком минус этапы чанка: presigned URL, открытие/seek видео, соединения. Модель — синглтон на процесс, сюда попадает только первая задача после старта реплики. В норме ~0; устойчивый горб = регресс (вернули тяжёлую инициализацию на задачу) или новый незамеренный этап.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(frame_task_duration_seconds_sum[15m])) / sum(rate(frame_task_duration_seconds_count[15m]))) - (sum(rate(frame_chunk_decode_duration_seconds_sum[15m])) / sum(rate(frame_chunk_decode_duration_seconds_count[15m])) + sum(rate(frame_chunk_inference_duration_seconds_sum[15m])) / sum(rate(frame_chunk_inference_duration_seconds_count[15m])) + sum(rate(frame_chunk_write_duration_seconds_sum[15m])) / sum(rate(frame_chunk_write_duration_seconds_count[15m])))",
+          "legendFormat": "setup + прочее"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Чанк p95: decode / inference / write",
+      "description": "Длительность чанка [start_s, end_s): decode = все cap.read() из MinIO по HTTP (сеть+FFmpeg), inference = сумма detect() по сэмплам, write = delete-range + insert + commit.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_chunk_decode_duration_seconds_bucket[15m])))", "legendFormat": "decode" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_chunk_inference_duration_seconds_bucket[15m])))", "legendFormat": "inference" },
+        { "refId": "C", "expr": "histogram_quantile(0.95, sum by (le) (rate(frame_chunk_write_duration_seconds_bucket[15m])))", "legendFormat": "write" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Лаг группы video-workers",
+      "description": "Число незавершённых задач в video_requests. Растёт = реплики не успевают (или легли).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (consumergroup) (kafka_consumergroup_lag{consumergroup=\"video-workers\"})", "legendFormat": "{{consumergroup}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Задачи: completed vs failed (rate)",
+      "description": "CUDA-смерть консьюмера сюда НЕ попадает (задача не терминальная, будет переобработана после рестарта).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 25 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "failed" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(frame_task_completed_total{status=\"completed\"}[15m]))", "legendFormat": "completed" },
+        { "refId": "B", "expr": "sum(rate(frame_task_completed_total{status=\"failed\"}[15m]))", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Задач выполнено за окно",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 25 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] } },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(frame_task_completed_total{status=\"completed\"}[$__range]))", "legendFormat": "completed" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Задач провалено за окно",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 25 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(frame_task_completed_total{status=\"failed\"}[$__range]))", "legendFormat": "failed" }
+      ]
+    }
+  ]
+}
