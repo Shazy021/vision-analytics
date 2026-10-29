@@ -1,4 +1,5 @@
 """Общие фикстуры для всего тестового сьюта."""
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -30,6 +31,22 @@ def _no_external_services():
     with patch("app.core.storage.ensure_bucket"), \
          patch("app.core.storage.set_stream_frames_ttl"):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_detector_singleton():
+    """
+    Синглтон модели живёт в модуле processor дольше, чем with-блок patch.object:
+    без сброса первый тест оставил бы свой мок-детектор всем последующим,
+    и они молча детектировали моком первого.
+
+    Сброс через sys.modules, а не import: процессор тянет ultralytics/torch,
+    лёгкие API-тесты не должны платить за этот импорт ради фикстуры.
+    """
+    yield
+    mod = sys.modules.get("app.processing.processor")
+    if mod is not None:
+        mod._detector_singleton = None
 
 
 @pytest.fixture

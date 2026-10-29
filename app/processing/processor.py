@@ -43,6 +43,24 @@ CHUNK_ATTEMPTS = 3
 # живой прогресс, а не «0» до конца чанка (чанк — минуты работы).
 PROGRESS_REPORT_EVERY = 50
 
+# Модель YOLO — одна на процесс консьюмера. Загрузка весов в VRAM стоит
+# 15-20с, а задач (чанков) за жизнь процесса проходят десятки — платить
+# за каждую бессмысленно: модель stateless между детекциями. Лениво:
+# импорт модуля не должен греть CUDA/VRAM (processor импортируют тесты
+# и API, где инференса нет). Конструктор вызывается по имени модуля,
+# поэтому patch.object(processor, "YOLODetector") в тестах работает и
+# через кэш; изоляция тестов — фикстура сброса в conftest.
+# Лока нет: консьюмер однопоточный (poll-цикл), поток /metrics модель
+# не трогает.
+_detector_singleton: "YOLODetector | None" = None
+
+
+def _get_detector() -> YOLODetector:
+    global _detector_singleton
+    if _detector_singleton is None:
+        _detector_singleton = YOLODetector()
+    return _detector_singleton
+
 
 def _get_video_source(video: Video) -> str:
     """
@@ -99,7 +117,7 @@ def process_video(video_id: int, db: Session) -> None:
         # ============================================================
         # Шаг 4-5: Извлекаем кадры и детектируем объекты
         # ============================================================
-        detector = YOLODetector()
+        detector = _get_detector()
         all_detections = []
 
         with VideoCapture(video_source) as cap:
@@ -319,7 +337,7 @@ def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session
         if slot >= 0:
             budget = allocate_sample_budgets(len(chunks), total_budget)[slot]
 
-    detector = YOLODetector()
+    detector = _get_detector()
     last_err: Exception | None = None
     # Прогресс внутри чанка: каждые PROGRESS_REPORT_EVERY сэмплов —
     # атомарный инкремент. При ретрае частично зарепортанное откатывается,
