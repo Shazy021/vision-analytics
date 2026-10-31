@@ -32,10 +32,14 @@ from prometheus_client import Counter, Histogram, start_http_server
 
 logger = logging.getLogger(__name__)
 
-# Единые бакеты для всех гистограмм: покрывают от 10 мс (decode кадра)
-# до 10 с (инференс на слабом CPU / большой батч). 11 бакетов × серия —
-# разумный компромисс между точностью квантилей и размером TSDB.
-DURATION_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+# Единые бакеты для всех стримовых гистограмм: от 10 мс (decode кадра)
+# до 60 с. Хвост 20/30/60 обязателен: queue-wait и e2e при насыщении
+# растут вместе с бэклогом, а histogram_quantile() не может вернуть
+# больше верхнего бакета — без хвоста квантили залипали на 10с и
+# выглядели как «задержка 10 секунд», хотя очередь росла минутами.
+# 12 бакетов × серия — разумный компромисс между точностью квантилей
+# и размером TSDB.
+DURATION_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60)
 
 # --- yolo-consumer (raw_frames → YOLO → detections), /metrics :9091 ---
 frames_received_total = Counter(
@@ -67,12 +71,17 @@ poison_messages_total = Counter(
     "poison_messages_total",
     "Messages skipped after handler failure in yolo-consumer",
 )
+frame_save_duration_seconds = Histogram(
+    "frame_save_duration_seconds",
+    "Clean frame upload to MinIO (only frames with detections)",
+    buckets=DURATION_BUCKETS,
+)
 
 # --- detection-consumer (detections → PostgreSQL), /metrics :9092 ---
 frame_written_total = Counter(
     "frame_written_total",
     "Frames handled by detection-consumer by outcome",
-    ["result"],  # ok | skipped | error | missing_ts
+    ["result"],  # ok | skipped | orphan | error | missing_ts
 )
 frame_write_duration_seconds = Histogram(
     "frame_write_duration_seconds",

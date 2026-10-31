@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 
 from confluent_kafka import Consumer
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import SessionLocal
 from app.core.metrics import (
@@ -50,6 +51,10 @@ def _parse_captured_at(raw: str | None) -> datetime | None:
 class DetectionConsumer:
     """Читает детекции из Kafka и пишет в PostgreSQL"""
 
+    # Как часто предупреждать о каждом «осиротевшем» stream_id: кадры
+    # удалённого стрима могут идти сотнями, лог не должен тонуть в них.
+    _ORPHAN_WARN_INTERVAL_S = 60.0
+
     def __init__(self):
         self.consumer = Consumer({
             "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
@@ -57,6 +62,7 @@ class DetectionConsumer:
             "auto.offset.reset": "earliest",
         })
         self.consumer.subscribe([TOPIC_DETECTIONS])
+        self._last_orphan_warn: dict[int, float] = {}
 
     def run(self):
         logger.info(f"Listening to Kafka topic '{TOPIC_DETECTIONS}'...")
@@ -87,7 +93,8 @@ class DetectionConsumer:
 
         Результат — значение лейбла frame_written_total:
         ok (записан, captured_at валиден) | missing_ts (записан, но e2e
-        не измерить) | skipped (нет stream_id) | error (БД отвалилась).
+        не измерить) | skipped (нет stream_id) | orphan (стрим удалён,
+        кадр выброшен) | error (БД отвалилась).
         """
         started = time.perf_counter()
         # Топик detections — исключительно стримовый (видео пишут в БД
@@ -126,6 +133,16 @@ class DetectionConsumer:
                 db.add(db_obj)
             db.commit()
             logger.info(f"Saved {len(detection.get('objects', []))} detections for frame #{detection['frame_index']}")
+        except IntegrityError:
+            # Стрим удалили, пока его кадры ещё шли по топикам (raw_frames →
+            # yolo → detections): FK на streams.id рвётся. Такие кадры
+            # бесполезны (стрима больше нет) — выбрасываем, а не крутим
+            # сообщение в цикле ошибок. Автокоммит оффсета дальше двигает
+            # группу, так что это не poison message.
+            db.rollback()
+            self._warn_orphan(stream_id, detection.get("frame_index"))
+            frame_written_total.labels(result="orphan").inc()
+            return "orphan"
         except Exception:
             db.rollback()
             logger.exception("Error saving to DB")
@@ -144,6 +161,17 @@ class DetectionConsumer:
         finally:
             db.close()
             frame_write_duration_seconds.observe(time.perf_counter() - started)
+
+    def _warn_orphan(self, stream_id: int, frame_index: int | None) -> None:
+        """Предупредить об осиротевшем стриме, но не чаще раза в минуту на id."""
+        now = time.monotonic()
+        if now - self._last_orphan_warn.get(stream_id, 0.0) >= self._ORPHAN_WARN_INTERVAL_S:
+            self._last_orphan_warn[stream_id] = now
+            logger.warning(
+                "Выбрасываю детекции удалённого стрима %s (кадр %s): "
+                "кадры ушли в топик до удаления стрима",
+                stream_id, frame_index,
+            )
 
 
 if __name__ == "__main__":
