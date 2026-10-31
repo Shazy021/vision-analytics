@@ -64,13 +64,23 @@ class TestQueueWaitSeconds:
 
 
 class TestYoloHandleMetrics:
+    """Метрики ингресса yolo-consumer: счётчики и queue-wait на пути
+    сообщения через _process_partition (decode в пуле → батч → produce)."""
+
     def _make_consumer(self):
+        from concurrent.futures import ThreadPoolExecutor
+
         from app.consumers.yolo_frames import YOLOConsumer
         c = YOLOConsumer.__new__(YOLOConsumer)
         c.detector = MagicMock()
-        c.detector.detect.return_value = []
+        c.detector.detect_batch.return_value = [[]]
         c.producer = MagicMock()
         c.consumer = MagicMock()
+        c.batch_max = 4
+        c.grace_ms = 1
+        c.pool = ThreadPoolExecutor(max_workers=2)
+        c.poison_count = 0
+        c.consecutive_failures = 0
         return c
 
     def _make_msg(self, ts=(1, 1)):
@@ -82,6 +92,7 @@ class TestYoloHandleMetrics:
             "stream_id": 3,
         }).encode()
         msg.timestamp.return_value = ts
+        msg.error.return_value = None
         return msg
 
     def test_counters_and_queue_wait(self):
@@ -91,7 +102,7 @@ class TestYoloHandleMetrics:
              patch("app.consumers.yolo_frames.frames_received_total") as received, \
              patch("app.consumers.yolo_frames.frame_processed_total") as processed, \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
-            c._handle(self._make_msg(ts=(1, ts_ms)))
+            c._process_partition(0, [self._make_msg(ts=(1, ts_ms))])
 
         received.inc.assert_called_once()
         processed.labels.assert_called_once_with(result="ok")
@@ -103,7 +114,7 @@ class TestYoloHandleMetrics:
         c = self._make_consumer()
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()), \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
-            c._handle(self._make_msg(ts=(0, -1)))
+            c._process_partition(0, [self._make_msg(ts=(0, -1))])
         queue.labels.assert_not_called()
 
 

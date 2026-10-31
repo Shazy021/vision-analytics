@@ -1,6 +1,7 @@
 """Тесты для Kafka streaming модуля"""
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -51,6 +52,12 @@ class TestYOLOConsumer:
         c.detector = MagicMock()
         c.producer = MagicMock()
         c.consumer = MagicMock()
+        # Атрибуты, которые в бою создаёт __init__ (батчинг + пул IO)
+        c.batch_max = 4
+        c.grace_ms = 1
+        c.pool = ThreadPoolExecutor(max_workers=2)
+        c.poison_count = 0
+        c.consecutive_failures = 0
         return c
 
     def test_poison_message_is_skipped_not_fatal(self):
@@ -60,17 +67,21 @@ class TestYOLOConsumer:
         bad_msg.value.return_value = b"not json at all"
         bad_msg.error.return_value = None                  # ВАЖНО: без этого
             # msg.error() вернёт MagicMock — а это truthy, и мы уйдём в ветку
-            # "Kafka error: continue", не дойдя до _handle. Классическая ловушка.
+            # "Kafka error: continue", не дойдя до обработки. Классическая ловушка.
         bad_msg.topic.return_value = "raw_frames"
+        bad_msg.partition.return_value = 0                 # sorted() по ним
         bad_msg.offset.return_value = 42
 
         def fake_poll(timeout):
-            if not fake_poll.called:
-                fake_poll.called = True
+            # 1-й poll: сообщение; 2-й: пусто (батч собран — очередь холодна);
+            # 3-й: выход из run().
+            fake_poll.calls = getattr(fake_poll, "calls", 0) + 1
+            if fake_poll.calls == 1:
                 return bad_msg
+            if fake_poll.calls == 2:
+                return None
             raise KeyboardInterrupt
 
-        fake_poll.called = False
         consumer.consumer.poll.side_effect = fake_poll
 
         consumer.run()
@@ -82,6 +93,7 @@ class TestYOLOConsumer:
         bad_msg.value.return_value = b'{"frame_data": "", "frame_index": 1, "source": "s", "stream_id": 1}'
         bad_msg.error.return_value = None
         bad_msg.topic.return_value = "raw_frames"
+        bad_msg.partition.return_value = 0                 # sorted() по ним
         bad_msg.offset.return_value = 7
         return bad_msg
 
@@ -89,15 +101,18 @@ class TestYOLOConsumer:
         """Липкая CUDA-ошибка — не poison message: процесс обязан выйти,
         иначе зомби-консумер вечно сжигает offset'ы мёртвым CUDA-контекстом."""
         consumer = self._make_consumer()
-        consumer.detector.detect.side_effect = RuntimeError("CUDA error: unknown error")
+        consumer.detector.detect_batch.side_effect = RuntimeError(
+            "CUDA error: unknown error"
+        )
 
         def fake_poll(timeout):
-            if not fake_poll.called:
-                fake_poll.called = True
+            fake_poll.calls = getattr(fake_poll, "calls", 0) + 1
+            if fake_poll.calls == 1:
                 return self._make_bad_msg()
+            if fake_poll.calls == 2:
+                return None
             raise AssertionError("run() должен выйти до следующего poll")
 
-        fake_poll.called = False
         consumer.consumer.poll.side_effect = fake_poll
 
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
@@ -110,7 +125,7 @@ class TestYOLOConsumer:
         """yolo-consumer обязан пронести captured_at сквозняком: инференс
         и очередь не должны сдвигать время детекции."""
         consumer = self._make_consumer()
-        consumer.detector.detect.return_value = []
+        consumer.detector.detect_batch.return_value = [[]]
 
         msg = MagicMock()
         msg.value.return_value = json.dumps({
@@ -120,9 +135,10 @@ class TestYOLOConsumer:
             "stream_id": 3,
             "captured_at": "2026-10-28T15:00:00+00:00",
         }).encode()
+        msg.error.return_value = None
 
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
-            consumer._handle(msg)
+            consumer._process_partition(0, [msg])
 
         produced = json.loads(consumer.producer.produce.call_args.kwargs["value"])
         assert produced["captured_at"] == "2026-10-28T15:00:00+00:00"
@@ -130,6 +146,7 @@ class TestYOLOConsumer:
     def test_consecutive_failures_trigger_restart(self):
         """N подряд не-CUDA падений — тоже выход, а не бесконечный skip."""
         consumer = self._make_consumer()
+        consumer.detector.detect_batch.side_effect = RuntimeError("boom")
         consumer.detector.detect.side_effect = RuntimeError("boom")
 
         def fake_poll(timeout):
@@ -137,8 +154,9 @@ class TestYOLOConsumer:
 
         consumer.consumer.poll.side_effect = fake_poll
 
-        with pytest.raises(SystemExit) as exc_info:
-            consumer.run()
+        with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
+            with pytest.raises(SystemExit) as exc_info:
+                consumer.run()
         assert exc_info.value.code == 1
         assert consumer.poison_count == 10
 

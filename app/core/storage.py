@@ -33,7 +33,11 @@ logger.info(f"[Storage] S3: {_endpoint_host}:{_endpoint_port}, bucket={BUCKET}")
 # выжидает полный urllib3-бэкофф (~6+ сек на вызов), и старт приложения
 # без MinIO подвисает на десятки секунд. 2 сек на подключение + 2 попытки
 # — MinIO недоступен становится понятно сразу, lifespan это переживает.
+# maxsize=8: yolo-consumer грузит кадры в MinIO из пула потоков параллельно,
+# с дефолтным maxsize=1 urllib3 на каждом аплоиде пишет
+# "Connection pool is full, discarding connection" и рвёт сокеты.
 _HTTP_CLIENT = urllib3.PoolManager(
+    maxsize=8,
     timeout=urllib3.Timeout(connect=2.0, read=30.0),
     retries=urllib3.Retry(
         total=2,
@@ -57,7 +61,7 @@ client = Minio(
 #   - браузер (st.video) получает ссылку напрямую и обязан достучаться до
 #     MinIO по АДРЕСУ С МАШИНЫ ПОЛЬЗОВАТЕЛЯ (http://localhost:9000).
 # Хост участвует в подписи SigV4, поэтому подмена хоста в готовой ссылке
-# ломает подпись —.presign делаем отдельным клиентом на публичном endpoint.
+# ломает подпись — presign делаем отдельным клиентом на публичном endpoint.
 _presign_client = client
 if settings.s3_public_endpoint:
     _public_url = urlparse(

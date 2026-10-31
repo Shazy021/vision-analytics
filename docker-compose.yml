@@ -135,8 +135,11 @@ services:
     command: >
       bash -c "
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
-      --topic raw_frames --partitions 3 --replication-factor 1
+      --topic raw_frames --partitions 6 --replication-factor 1
       --config retention.ms=3600000
+      &&
+      ( kafka-topics --bootstrap-server kafka:29092 --alter --topic raw_frames --partitions 6
+      || echo 'raw_frames already has >= 6 partitions' )
       &&
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
       --topic detections --partitions 1 --replication-factor 1
@@ -167,6 +170,11 @@ services:
     # не из CLI-аргумента: аргумент имеет приоритет над настройками и
     # захардкодил бы yolov8n навсегда.
     command: python -m app.consumers.yolo_frames
+    # Две реплики — симметрично с video-consumer
+    # Партиций у raw_frames 6 — на вырост: вернуть replicas: 3 можно без
+    # репартиционирования.
+    deploy:
+      replicas: 2
     # Липкая CUDA-ошибка убивает контекст в процессе — consumer сам выходит
     # с кодом 1 (см. yolo_consumer.py), а супервизор поднимает новый процесс
     # со свежим контекстом. Без этого GPU-сбой превращается в зомби, который

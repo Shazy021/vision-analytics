@@ -21,9 +21,14 @@ scrape_configs:
     static_configs:
       - targets: ["api:8000"]
 
+  # Та же схема, что у video-consumer (комментарий ниже): реплики масштабируются,
+  # static-таргет на DNS-имя сервиса чередовал бы их round-robin как один процесс.
   - job_name: yolo-consumer
-    static_configs:
-      - targets: ["yolo-consumer:9091"]
+    dns_sd_configs:
+      - names: ["yolo-consumer"]
+        type: "A"
+        port: 9091
+        refresh_interval: 15s
 
   - job_name: detection-consumer
     static_configs:

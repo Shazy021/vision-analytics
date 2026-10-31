@@ -240,8 +240,14 @@ class FrameProducer:
                         "captured_at": datetime.now(timezone.utc).isoformat(),
                     }).encode()
 
+                    # Ключ = stream_id: ВСЕ кадры стрима падают в одну
+                    # партицию — порядок кадров стрима сохраняется сквозняком
+                    # (consumer обрабатывает партицию в порядке поступления).
+                    # Без ключа librdkafka рассыпал бы кадры стрима по
+                    # партициям случайно, и порядок внутри стрима терялся.
                     self.producer.produce(
                         TOPIC_RAW_FRAMES,
+                        key=str(self.stream_id) if self.stream_id is not None else None,
                         value=message,
                         callback=self._delivery_report,
                     )
