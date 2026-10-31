@@ -3,6 +3,7 @@
 #
 # Windows PowerShell alternative to `make up`:
 #   .\scripts\up.ps1                 # start the full stack
+#   .\scripts\up.ps1 -Action build   # rebuild images (after code changes)
 #   .\scripts\up.ps1 -Action down    # stop
 #   .\scripts\up.ps1 -Action logs    # follow logs
 #   .\scripts\up.ps1 -Action ps      # service status
@@ -15,7 +16,7 @@
 # ============================================================
 
 param(
-    [ValidateSet("up", "down", "logs", "ps")]
+    [ValidateSet("up", "build", "down", "logs", "ps")]
     [string]$Action = "up"
 )
 
@@ -36,6 +37,7 @@ switch ($Action) {
         Write-Host ""
         Write-Host "Dashboard: http://localhost:8501 | Swagger: http://localhost:8000/docs"
     }
+    "build" { docker compose $files build }
     "down" { docker compose $files down }
     "logs" { docker compose $files logs -f }
     "ps"   { docker compose $files ps }

@@ -10,7 +10,6 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.api.routes import analytics, streams, videos
 from app.core.database import init_db
 
-# Настройка логгера для этого модуля
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(name)s - %(levelname)s - %(message)s",

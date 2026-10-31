@@ -152,7 +152,6 @@ def upload_video(
     4. Публикуем задачу в Kafka (топик video_requests) → ответ клиенту (СРАЗУ!)
     5. video_consumer читает видео НАПРЯМУЮ из MinIO по HTTP (без скачивания)
     """
-    # Проверяем расширение
     allowed = {".mp4", ".avi", ".mov", ".mkv"}
     ext = Path(file.filename).suffix.lower()
     if ext not in allowed:
