@@ -13,13 +13,17 @@
 # nvidia-smi -L печатает список карт; пустой вывод = GPU нет
 GPU := $(shell nvidia-smi -L 2>/dev/null)
 
+# Ролик-источник для бенчмарка: один и тот же между прогонами —
+# иначе прогоны несравнимы (bench/README.md, «Ограничения»)
+BENCH_VIDEO ?= uploads/Praha_air.mp4
+
 ifeq ($(GPU),)
 COMPOSE_FILES = -f docker-compose.yml
 else
 COMPOSE_FILES = -f docker-compose.yml -f docker-compose.gpu.yml
 endif
 
-.PHONY: help up down restart logs ps build migrate test lint clean
+.PHONY: help up down restart logs ps build migrate test lint bench clean
 
 help: ## Показать список команд
 	@echo "Vision Analytics Platform — команды:"
@@ -33,6 +37,7 @@ help: ## Показать список команд
 	@echo "  make migrate  применить миграции Alembic"
 	@echo "  make test     прогнать тесты (нужен локальный venv)"
 	@echo "  make lint     ruff-проверка (нужен локальный venv)"
+	@echo "  make bench    vision-bench: ёмкость и узкое место стримов (нужен venv + стек)"
 	@echo "  make clean    остановить и удалить контейнеры/тома (ОСТОРОЖНО: данные)"
 	@echo ""
 	@echo "GPU: $(if $(GPU),найден → $(GPU),не найден → запуск на CPU)"
@@ -64,7 +69,10 @@ test: ## Запустить тесты (локально, из venv)
 	pytest tests/ -v --tb=short
 
 lint: ## Проверить код ruff'ом (локально, из venv)
-	ruff check app dashboard tests
+	ruff check app dashboard tests scripts
+
+bench: ## vision-bench: ёмкость и узкое место стримов (нужен venv + стек)
+	python -m bench run --profile default --video $(BENCH_VIDEO) --label manual
 
 clean: ## Остановить и удалить контейнеры и тома (ДАННЫЕ БД/MinIO будут потеряны)
 	docker compose $(COMPOSE_FILES) down -v

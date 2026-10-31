@@ -12,9 +12,10 @@
 #   Локалка: pip install -e ".[gpu,dash,dev]"
 #
 # Extras:
-#   gpu  — инференс (ultralytics; torch уже установлен из индекса)
-#   dash — дашборд (streamlit/plotly/matplotlib/Pillow)
-#   dev  — тесты и инструменты разработки (в образы НЕ попадают)
+#   gpu   — инференс (ultralytics; torch уже установлен из индекса)
+#   dash  — дашборд (streamlit/plotly/matplotlib/Pillow)
+#   bench — внешний автобенчмарк (хост-сторона, в образы НЕ попадает)
+#   dev   — тесты и инструменты разработки (в образы НЕ попадают)
 #
 # name — обязательное поле PEP 621 (без него pip не соберёт пакет);
 # version сознательно не указан — проект не публикуется.
@@ -71,6 +72,12 @@ dash = [
     "matplotlib==3.9.2",
     "Pillow==10.4.0",
 ]
+# Автобенчмарк (bench/): REST-клиент + графики отчётов. Версии совпадают
+# с dash, чтобы двойная установка не конфликтовала.
+bench = [
+    "requests==2.32.3",
+    "matplotlib==3.9.2",
+]
 # Разработка: версии синхронизированы с .pre-commit-config.yaml и CI
 dev = [
     "pytest==8.3.0",
@@ -84,6 +91,8 @@ dev = [
 include = ["app*"]
 
 [tool.pytest.ini_options]
+# Корень репо в sys.path: тесты импортируют и app.*, и bench.*
+pythonpath = ["."]
 # Автоматически распознавать async-тесты без @pytest.mark.asyncio
 asyncio_mode = "auto"
 # Новый event loop для каждой тест-функции (чистое окружение)

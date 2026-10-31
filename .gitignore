@@ -37,6 +37,9 @@ desktop.ini
 # Uploads & data
 uploads/
 data/
+bench/.assets
+# Синтетические прогоны selftest (реальные stream-* базовые прогоны версионируются)
+bench/results/selftest/
 
 # Docker volumes
 models_cache/
