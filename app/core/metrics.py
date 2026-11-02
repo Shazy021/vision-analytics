@@ -33,13 +33,14 @@ from prometheus_client import Counter, Histogram, start_http_server
 logger = logging.getLogger(__name__)
 
 # Единые бакеты для всех стримовых гистограмм: от 10 мс (decode кадра)
-# до 60 с. Хвост 20/30/60 обязателен: queue-wait и e2e при насыщении
-# растут вместе с бэклогом, а histogram_quantile() не может вернуть
-# больше верхнего бакета — без хвоста квантили залипали на 10с и
-# выглядели как «задержка 10 секунд», хотя очередь росла минутами.
-# 12 бакетов × серия — разумный компромисс между точностью квантилей
+# до 5 мин. Хвост 120/180/300 обязателен: queue-wait и e2e при насыщении
+# растут вместе с бэклогом (бенч на 75 fps дал очередь ~22 с и продолжает
+# расти, пока консьюмер не разгребёт), а histogram_quantile() не может
+# вернуть больше верхнего бакета — без хвоста квантили залипали на 60с и
+# выглядели как «задержка минута», хотя очередь росла минутами.
+# 15 бакетов × серия — разумный компромисс между точностью квантилей
 # и размером TSDB.
-DURATION_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60)
+DURATION_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 180, 300)
 
 # --- yolo-consumer (raw_frames → YOLO → detections), /metrics :9091 ---
 frames_received_total = Counter(
@@ -58,7 +59,7 @@ frame_decode_duration_seconds = Histogram(
 )
 frame_inference_duration_seconds = Histogram(
     "frame_inference_duration_seconds",
-    "detector.detect() for one frame",
+    "Per-frame share of the batch inference wall time (batch / frames)",
     buckets=DURATION_BUCKETS,
 )
 frame_queue_wait_seconds = Histogram(
