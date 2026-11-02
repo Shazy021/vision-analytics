@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.frame_envelope import pack
 from app.core.metrics import parse_epoch_seconds, queue_wait_seconds
 
 
@@ -65,7 +66,7 @@ class TestQueueWaitSeconds:
 
 class TestYoloHandleMetrics:
     """Метрики ингресса yolo-consumer: счётчики и queue-wait на пути
-    сообщения через _process_partition (decode в пуле → батч → produce)."""
+    сообщения через _process_batch (decode в пуле → батч → produce)."""
 
     def _make_consumer(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -85,12 +86,11 @@ class TestYoloHandleMetrics:
 
     def _make_msg(self, ts=(1, 1)):
         msg = MagicMock()
-        msg.value.return_value = json.dumps({
-            "frame_data": "e30=",  # валидный base64, imdecode замокан
+        msg.value.return_value = pack({
             "frame_index": 1,
             "source": "rtsp://x",
             "stream_id": 3,
-        }).encode()
+        }, b"fake-jpeg")  # imdecode замокан
         msg.timestamp.return_value = ts
         msg.error.return_value = None
         return msg
@@ -102,7 +102,7 @@ class TestYoloHandleMetrics:
              patch("app.consumers.yolo_frames.frames_received_total") as received, \
              patch("app.consumers.yolo_frames.frame_processed_total") as processed, \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
-            c._process_partition(0, [self._make_msg(ts=(1, ts_ms))])
+            c._process_batch({0: [self._make_msg(ts=(1, ts_ms))]})
 
         received.inc.assert_called_once()
         processed.labels.assert_called_once_with(result="ok")
@@ -114,7 +114,7 @@ class TestYoloHandleMetrics:
         c = self._make_consumer()
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()), \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
-            c._process_partition(0, [self._make_msg(ts=(0, -1))])
+            c._process_batch({0: [self._make_msg(ts=(0, -1))]})
         queue.labels.assert_not_called()
 
 

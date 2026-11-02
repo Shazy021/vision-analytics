@@ -102,7 +102,7 @@ RTSP URL -> app.streams.producer.FrameProducer (subprocess, spawned by stream_ma
 Reads RTSP via OpenCV.VideoCapture (forced TCP transport in Docker)
     |
 Every Nth frame:
-  - Encode JPEG + base64
+  - Encode JPEG, publish as binary envelope (metadata + JPEG)
   - Publish to Kafka topic "raw_frames"
         |
         +--> app.consumers.yolo_frames.YOLOConsumer
@@ -538,9 +538,10 @@ observations — don't trust the quantile.
   dozens of tasks (chunks) pass through a process lifetime. Log-measured:
   first chunk on a replica 45.4s vs 27-28s for equal later chunks (900
   samples, ~5k detections); a short video 23.6s -> 2.3s.
-- GPU processes batches more efficiently than single frames
-  (`detect_batch()` exists in code but is not yet wired into the pipeline)
-- Kafka `message.max.bytes`: 5 MB (JPEG frames in base64)
+- GPU processes batches more efficiently than single frames: yolo-consumer
+  collects a dynamic batch across all assigned partitions and runs a single
+  `detect_batch()` per collection (cross-stream batching)
+- Kafka `message.max.bytes`: 5 MB (JPEG frames in a binary envelope)
 - Kafka retention: `raw_frames` = 1 hour, `detections` = 24 hours, `video_requests` = 24 hours
 - MinIO upload: `fput_object` (multipart) for videos, `put_object` for frames
 

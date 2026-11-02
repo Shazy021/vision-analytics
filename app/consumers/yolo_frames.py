@@ -11,23 +11,27 @@ Phase 4: Сохраняем ЧИСТЫЕ кадры со стримов в MinIO
 потолок ~20 fps: GPU простаивал, пока один поток делал imdecode и ждал
 MinIO, а бенчмарк показывал 100% e2e-бюджета в ожидании raw_frames.
 Теперь потребитель работает микро-батчами, и батч собирается ДИНАМИЧЕСКИ:
-  1. собирает до YOLO_BATCH_SIZE сообщений с партиции: окно
+  1. собирает до YOLO_BATCH_SIZE сообщений со ВСЕХ назначенных партиций: окно
      YOLO_BATCH_GRACE_MS ограничивает ожидание ПЕРВОГО сообщения, дальше
      батч расширяется, только пока очередь горячая (сообщения приходят из
      локального кэша librdkafka почти мгновенно). Под бэклогом батч
      набирается за миллисекунды, при низкой нагрузке одиночный кадр
      обрабатывается без ожидания несуществующих партнёров;
-  2. декодит (JSON/base64/imdecode) в пуле потоков — параллельно;
-  3. инференс БАТЧОМ (model(batch)) — GPU нагружается нормально;
-  4. produce в detections + аплоад в MinIO (тот же пул, параллельно);
+  2. декодит (бинарный конверт/imdecode) в пуле потоков — параллельно;
+  3. инференс ОДНИМ батчом (model(batch)) на весь сбор — кадры разных
+     стримов (разных партиций) не режутся обратно: вместе с key=stream_id
+     это и есть кросс-стримовый батч, GPU грузится целиком, а не по
+     одному стриму;
+  4. produce в detections + аплоад в MinIO (тот же пул, параллельно),
+     затем ОДИН flush и ОДИН коммит на батч;
   5. offset коммитится РУЧНОЙ, только когда батч полностью обработан и
      flushed в detections — at-least-once, как и раньше, но крах теряет
      ни кадры, ни неотправленные детекции.
-Порядок ВНУТРИ партиции сохраняется: батч берётся и обрабатывается в
-порядке поступления. Вместе с key=stream_id у producer'а порядок кадров
-стрима держится сквозняком.
+Порядок ВНУТРИ партиции сохраняется: сообщения в батч кладутся в порядке
+поступления. Вместе с key=stream_id у producer'а порядок кадров стрима
+держится сквозняком, а смешивание партиций в одном батче его не ломает —
+каждая детекция самодостаточна (frame_index + captured_at).
 """
-import base64
 import json
 import logging
 import time
@@ -40,6 +44,7 @@ from confluent_kafka import Consumer, KafkaException, Producer
 
 from app.core.config import settings
 from app.core.cuda import is_fatal_cuda_error
+from app.core.frame_envelope import unpack
 from app.core.metrics import (
     frame_decode_duration_seconds,
     frame_inference_duration_seconds,
@@ -193,10 +198,9 @@ class YOLOConsumer:
         if wait is not None:
             frame_queue_wait_seconds.labels(topic=TOPIC_RAW_FRAMES).observe(wait)
 
-        data = json.loads(msg.value().decode())
+        data, frame_bytes = unpack(msg.value())
 
         # Декодируем кадр
-        frame_bytes = base64.b64decode(data["frame_data"])
         started = time.perf_counter()
         frame = cv2.imdecode(
             np.frombuffer(frame_bytes, dtype=np.uint8),
@@ -246,15 +250,16 @@ class YOLOConsumer:
             raise SystemExit(1)
 
     def _collect_batch(self) -> dict[int, list]:
-        """Собрать сообщения в батчи по партициям (ДИНАМИЧЕСКИЙ батч).
+        """Собрать батч со всех назначенных партиций (ДИНАМИЧЕСКИЙ батч).
 
         Весь батч НЕ ждём: окно grace ограничивает ожидание ПЕРВОГО
         сообщения, дальнейшая сборка идёт, только пока очередь горячая
         (poll отдаёт сообщения из локального кэша почти мгновенно).
         Под бэклогом батч набирается до batch_max за миллисекунды; при
         низкой нагрузке одиночный кадр уходит без потерь латентности.
-        Возвращает {partition: [сообщения]} в порядке поступления —
-        порядок внутри партиции далее сохраняется.
+        Возвращает {partition: [сообщения]} в порядке поступления:
+        группировка нужна только для коммита offset'ов, инференс идёт
+        общим батчом (_process_batch).
         """
         parts: dict[int, list] = {}
         total = 0
@@ -278,13 +283,26 @@ class YOLOConsumer:
                 break
         return parts
 
-    def _process_partition(self, partition: int, msgs: list):
-        """Обработать срез одной партиции: decode → батч-инференс → produce/MinIO → коммит."""
+    def _process_batch(self, parts: dict[int, list]):
+        """Обработать весь собранный батч: decode → ОДИН инференс → produce/MinIO → коммит.
+
+        Партиция — НЕ единица обработки: кадры со всех назначенных партиций
+        (а с key=stream_id — со всех стримов) идут в один detect_batch,
+        иначе GPU получает нарезку по одному стриму и недогружен. Flush и
+        commit — по одному на батч, а не на партицию. Партиция учитывается
+        только при коммите: offset фиксируется последней message каждой.
+        """
+        msgs = []
+        for p in sorted(parts):        # партиции по возрастанию номера: 0, 1, 2...
+            for m in parts[p]:         # сообщения этой партиции — в порядке поступления
+                msgs.append(m)
+
         failures = 0
 
-        # 1) Декод параллельно (пул), порядок сохраняем
+        # 1) Декод параллельно (пул), порядок сохраняем.
         pairs = []  # (msg, meta, frame)
-        for msg, fut in ((m, self.pool.submit(self._prepare, m)) for m in msgs):
+        futs = [(m, self.pool.submit(self._prepare, m)) for m in msgs]
+        for msg, fut in futs:
             try:
                 meta, frame = fut.result()
                 pairs.append((msg, meta, frame))
@@ -294,7 +312,7 @@ class YOLOConsumer:
                 failures += 1
                 self._mark_failure(exc, TOPIC_RAW_FRAMES, msg.offset())
 
-        # 2) Инференс: батчом; если батч упал — деградация до по-кадрового
+        # 2) Инференс: одним батчом; если упал — деградация до по-кадрового
         results: list[list | None] = [None] * len(pairs)
         if pairs:
             started = time.perf_counter()
@@ -309,7 +327,7 @@ class YOLOConsumer:
             except Exception as exc:
                 if is_fatal_cuda_error(exc):
                     logger.critical(
-                        f"CUDA context is dead (partition={partition}): {exc}. "
+                        f"CUDA context is dead (batch of {len(pairs)} frames): {exc}. "
                         "Exiting, the supervisor will restart the consumer.",
                     )
                     raise SystemExit(1)
@@ -371,39 +389,36 @@ class YOLOConsumer:
         for fut in upload_futs:
             fut.result()  # _save_frame_to_minio сам глотает исключения
 
-        # 4) Ручной коммит: только после полного прохождения батча.
-        # Ядовитые сообщения коммитятся тоже — иначе они бы зацикливались.
-        # store_offsets(message=...) фиксирует offset+1 сообщения; внутри
-        # партиции сообщения упорядочены, поэтому достаточно последнего.
-        # KafkaException = партиция уехала к другому участнику прямо во
-        # время обработки батча (rebalance): коммитит теперь её новый
-        # владелец, а нам положены дубли — нормальная цена at-least-once.
+        # 4) Ручной коммит: только после полного прохождения батча, ОДИН
+        # на батч. store_offsets(message=...) фиксирует offset+1 сообщения;
+        # внутри партиции сообщения упорядочены, поэтому достаточно последней
+        # message каждой партиции. Ядовитые сообщения коммитятся тоже — иначе
+        # они бы зацикливались. KafkaException = партиция уехала к другому
+        # участнику прямо во время обработки (rebalance): коммитит теперь её
+        # новый владелец, а нам положены дубли — нормальная цена at-least-once.
         try:
-            self.consumer.store_offsets(message=msgs[-1])
+            for p in sorted(parts):
+                self.consumer.store_offsets(message=parts[p][-1])
             self.consumer.commit(asynchronous=False)
         except KafkaException as exc:
-            logger.warning(
-                "Commit skipped (partition rebalanced?): partition=%d: %s",
-                partition, exc,
-            )
+            logger.warning("Commit skipped (partition rebalanced?): %s", exc)
 
         if failures == 0:
             self.consecutive_failures = 0
         logger.debug(
-            "Partition %d: %d кадров обработано, %d ядовитых",
-            partition, len(pairs), failures,
+            "Batch: %d кадров обработано, %d ядовитых (партиции %s)",
+            len(pairs), failures, sorted(parts),
         )
 
     def step(self):
-        """Одна итерация цикла: сборка батчей + обработка по партициям.
+        """Одна итерация цикла: сборка батча + один проход обработки.
 
         Вынесено из run() для тестов (run() — бесконечная обёртка).
         """
         parts = self._collect_batch()
         if not parts:
             return
-        for partition in sorted(parts):
-            self._process_partition(partition, parts[partition])
+        self._process_batch(parts)
 
     def run(self):
         logger.info(

@@ -1,12 +1,11 @@
 """Тесты yolo-consumer (микро-батчи + пул потоков + ручные коммиты).
 
-Модель и Kafka замочены: проверяется ЛОГИКА потребителя —
-динамическая сборка батчей по партициям (горячая/холодная очередь),
-порядок внутри партиции, коммит только после produce+flush, пропуск яда
-без зацикливания, деградация батча до по-кадрового, выход при липкой
+Модель и Kafka замочены: проверяется ЛОГИКА потребителя — динамическая
+сборка кросс-партиционного батча (горячая/холодная очередь), порядок
+внутри партиции, коммит только после produce+flush, пропуск яда без
+зацикливания, деградация батча до по-кадрового, выход при липкой
 CUDA-ошибке.
 """
-import base64
 import json
 import time
 from collections import Counter, deque
@@ -17,6 +16,7 @@ import numpy as np
 import pytest
 
 from app.consumers import yolo_frames as yf
+from app.core.frame_envelope import pack
 from app.core.metrics import poison_messages_total
 
 
@@ -30,13 +30,12 @@ def _jpeg() -> bytes:
 def _msg(partition: int, offset: int, jpeg_bytes: bytes, stream_id: int = 7,
          frame_index: int | None = None):
     """Фейковое Kafka-сообщение с реальным полезным грузом."""
-    payload = json.dumps({
-        "frame_data": base64.b64encode(jpeg_bytes).decode(),
+    payload = pack({
         "frame_index": offset if frame_index is None else frame_index,
         "source": "test",
         "stream_id": stream_id,
         "captured_at": "2026-10-30T12:00:00+00:00",
-    }).encode()
+    }, jpeg_bytes)
     m = MagicMock()
     m.partition.return_value = partition
     m.offset.return_value = offset
@@ -117,9 +116,10 @@ def consumer(monkeypatch):
     return c
 
 
-def test_batches_by_partition_keeps_order_and_commits_after_produce(consumer):
-    """Батчи собираются ПО ПАРТИЦИЯМ, порядок внутри партии сохраняется,
-    коммит — после produce всех кадров батча."""
+def test_cross_partition_batch_single_inference_and_commit(consumer):
+    """Батч собирается со ВСЕХ партиций и обрабатывается ОДНИМ вызовом
+    detect_batch; порядок внутри партиции сохраняется, коммит — один на
+    батч после produce, offset'ы по последней message каждой партиции."""
     c = consumer
     m0 = _msg(0, 0, _jpeg(), frame_index=10)
     m1 = _msg(0, 1, _jpeg(), frame_index=11)
@@ -128,22 +128,20 @@ def test_batches_by_partition_keeps_order_and_commits_after_produce(consumer):
 
     c.step()
 
-    # Инференс шёл батчами по партициям: два вызова (2 кадра и 1 кадр)
-    assert c.det.detect_batch.call_count == 2
-    sizes = sorted(len(call.args[0]) for call in c.det.detect_batch.call_args_list)
-    assert sizes == [1, 2]
-    # Порядок внутри партиции 0: сначала кадр 10, потом 11
-    p0_calls = [call for call in c.det.detect_batch.call_args_list if len(call.args[0]) == 2]
-    assert [ref.index for ref in p0_calls[0].args[0]] == [10, 11]
+    # Один батч-инференс на 3 кадра с двух партиций, а не по партициям
+    assert c.det.detect_batch.call_count == 1
+    refs = c.det.detect_batch.call_args_list[0].args[0]
+    assert [ref.index for ref in refs] == [10, 11, 20]  # p0, потом p1, порядок внутри
 
     # Все три кадра улетели в detections
     assert len(c.fp.sent) == 3
     indices = sorted(json.loads(v)["frame_index"] for _, v in c.fp.sent)
     assert indices == [10, 11, 20]
 
-    # Offset зафиксирован последним сообщением каждой партиции (offset+1)
+    # Offset зафиксирован последним сообщением каждой партиции (offset+1),
+    # но коммит ОДИН на батч
     assert Counter(c.fc.stored) == Counter([2, 1])
-    assert c.fc.commits == 2  # по одному на партицию
+    assert c.fc.commits == 1
 
 
 def test_dynamic_batch_does_not_wait_when_queue_cold(consumer):

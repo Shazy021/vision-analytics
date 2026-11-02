@@ -1,5 +1,4 @@
 """Тесты для Kafka streaming модуля"""
-import base64
 import json
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
@@ -11,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.consumers.yolo_frames import YOLOConsumer
 from app.core.database import Base
+from app.core.frame_envelope import pack
 from app.db.models import Stream
 from app.streams.manager import MAX_FAST_CRASHES, StreamManager
 
@@ -90,7 +90,9 @@ class TestYOLOConsumer:
 
     def _make_bad_msg(self):
         bad_msg = MagicMock()
-        bad_msg.value.return_value = b'{"frame_data": "", "frame_index": 1, "source": "s", "stream_id": 1}'
+        bad_msg.value.return_value = pack(
+            {"frame_index": 1, "source": "s", "stream_id": 1}, b"fake-jpeg"
+        )
         bad_msg.error.return_value = None
         bad_msg.topic.return_value = "raw_frames"
         bad_msg.partition.return_value = 0                 # sorted() по ним
@@ -128,17 +130,16 @@ class TestYOLOConsumer:
         consumer.detector.detect_batch.return_value = [[]]
 
         msg = MagicMock()
-        msg.value.return_value = json.dumps({
-            "frame_data": base64.b64encode(b"fake-jpeg").decode(),
+        msg.value.return_value = pack({
             "frame_index": 7,
             "source": "rtsp://x",
             "stream_id": 3,
             "captured_at": "2026-10-28T15:00:00+00:00",
-        }).encode()
+        }, b"fake-jpeg")
         msg.error.return_value = None
 
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
-            consumer._process_partition(0, [msg])
+            consumer._process_batch({0: [msg]})
 
         produced = json.loads(consumer.producer.produce.call_args.kwargs["value"])
         assert produced["captured_at"] == "2026-10-28T15:00:00+00:00"

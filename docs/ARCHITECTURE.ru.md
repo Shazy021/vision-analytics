@@ -102,7 +102,7 @@ RTSP URL -> app.streams.producer.FrameProducer (subprocess, запускаетс
 Читает RTSP через OpenCV.VideoCapture (принудительный TCP-транспорт в Docker)
     |
 Каждые N кадров:
-  - Кодирование в JPEG + base64
+  - Кодирование в JPEG, публикация бинарным конвертом (метаданные + JPEG)
   - Публикация в Kafka топик "raw_frames"
         |
         +--> app.consumers.yolo_frames.YOLOConsumer
@@ -536,9 +536,10 @@ Video Track (полная трасса + «накладные расходы» �
   (чанков) за жизнь процесса проходят десятки. Замеры по логам: первый чанк
   на реплике 45.4с против 27-28с у последующих равных (900 сэмплов, ~5к
   детекций); короткое видео 23.6с → 2.3с.
-- GPU обрабатывает батчи эффективнее, чем одиночные кадры
-  (`detect_batch()` присутствует в коде, но пока не подключён к пайплайну)
-- Kafka `message.max.bytes`: 5 МБ (JPEG кадры в base64)
+- GPU обрабатывает батчи эффективнее, чем одиночные кадры: yolo-consumer
+  собирает динамический батч со всех назначенных партиций и делает один
+  `detect_batch()` на весь сбор (кросс-стримовый батч)
+- Kafka `message.max.bytes`: 5 МБ (JPEG кадры в бинарном конверте)
 - Kafka retention: `raw_frames` = 1 час, `detections` = 24 часа, `video_requests` = 24 часа
 - MinIO upload: `fput_object` (multipart) для видео, `put_object` для кадров
 
