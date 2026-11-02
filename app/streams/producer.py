@@ -8,8 +8,6 @@
   * источник на хосте (Windows):  rtsp://host.docker.internal:<port>/<path>
   * localhost изнутри контейнера — это сам контейнер, а НЕ машина хоста.
 """
-import base64
-import json
 import logging
 import os
 import time
@@ -18,6 +16,7 @@ from datetime import datetime, timezone
 import cv2
 from confluent_kafka import Producer
 
+from app.core.frame_envelope import pack
 from app.core.topics import KAFKA_BOOTSTRAP_SERVERS, TOPIC_RAW_FRAMES
 
 logger = logging.getLogger(__name__)
@@ -225,11 +224,13 @@ class FrameProducer:
                     next_read = time.monotonic() + frame_period
 
                 if frame_index % frame_interval == 0:
-                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    frame_b64 = base64.b64encode(buffer).decode()
+                    ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if not ok:
+                        logger.warning("Кадр не закодировался в JPEG — пропущен (frame_index=%d)", frame_index)
+                        frame_index += 1
+                        continue
 
-                    message = json.dumps({
-                        "frame_data": frame_b64,
+                    message = pack({
                         "frame_index": frame_index,
                         "source": self.source,
                         "stream_id": self.stream_id,
@@ -238,7 +239,7 @@ class FrameProducer:
                         # отставал/лежал) старые кадры не «омолаживаются» до
                         # now(), и stream-activity показывает реальное время.
                         "captured_at": datetime.now(timezone.utc).isoformat(),
-                    }).encode()
+                    }, buffer.tobytes())
 
                     # Ключ = stream_id: ВСЕ кадры стрима падают в одну
                     # партицию — порядок кадров стрима сохраняется сквозняком

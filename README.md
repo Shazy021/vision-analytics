@@ -298,7 +298,7 @@ pre-commit install
 
 | Топик | Retention | Описание |
 |-------|-----------|----------|
-| `raw_frames` | 1 час | Кадры от Producer (base64 JPEG) |
+| `raw_frames` | 1 час | Кадры от Producer (бинарный конверт: мета + JPEG) |
 | `detections` | 24 часа | YOLO-детекции (JSON) |
 | `video_requests` | 24 часа | Задачи на обработку загруженных видео (JSON) |
 
