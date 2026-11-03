@@ -24,6 +24,27 @@ class YOLODetector:
 
         self.model = YOLO(weights_path)
         self.device = device
+        # FP16 на CUDA: forward ~1.7–2x быстрее на современных RTX, веса и
+        # активации весят вдвое меньше. device здесь уже конкретный
+        # ("cuda"/"0"/"cpu") — settings резолвит "auto" на своём уровне,
+        # поэтому достаточно проверки «не cpu».
+        self.half = str(device).lower() != "cpu"
+        self._half_kwargs = self._fp16_kwargs()
+
+    @staticmethod
+    def _fp16_kwargs() -> dict:
+        """FP16-аргументы predict под версию Ultralytics.
+
+        В 8.4 half переименован в quantize (16 = FP16); старый half ещё
+        принимается, но пишет deprecated-варнинг на КАЖДЫЙ вызов (спам в
+        логах консьюмера батч за батчем). Определяем один раз при старте."""
+        try:
+            from ultralytics.cfg import DEFAULT_CFG
+            if hasattr(DEFAULT_CFG, "quantize"):
+                return {"quantize": 16}
+        except Exception:
+            pass
+        return {"half": True}
 
     def detect(self, frame, frame_index: int = 0, timestamp: float = 0.0, conf: float = 0.25) -> list[Detection]:
         """
@@ -31,7 +52,10 @@ class YOLODetector:
 
         conf — порог уверенности, всё ниже отбрасывается.
         """
-        results = self.model(frame, conf=conf, device=self.device, verbose=False)
+        results = self.model(
+            frame, conf=conf, device=self.device, verbose=False,
+            **(self._half_kwargs if self.half else {}),
+        )
         return self._parse_results(results[0], frame_index, timestamp)
 
     def detect_batch(self, frames: list, conf: float = 0.25) -> list[list[Detection]]:
@@ -42,7 +66,10 @@ class YOLODetector:
         На CPU разницы почти нет.
         """
         images = [f.image for f in frames]
-        results = self.model(images, conf=conf, device=self.device, verbose=False)
+        results = self.model(
+            images, conf=conf, device=self.device, verbose=False,
+            **(self._half_kwargs if self.half else {}),
+        )
 
         all_detections = []
         for i, result in enumerate(results):
@@ -52,25 +79,29 @@ class YOLODetector:
         return all_detections
 
     def _parse_results(self, result, frame_index: int, timestamp: float) -> list[Detection]:
-        """Конвертация результата Ultralytics в наш формат Detection."""
-        detections = []
+        """Конвертация результата Ultralytics в наш формат Detection.
 
+        Тензоры снимаются с GPU ОДНИМ .cpu(): индексация CUDA-тензора по
+        боксам (cls[i], conf[i], xyxy[i]) — это полный GPU-sync на каждый
+        доступ, 3N синхронизаций на кадр с N боксов. Под нагрузкой это
+        добавляло миллисекунды к каждому кадру и блокировало конвейер.
+        """
+        boxes = result.boxes
         # Если ничего не нашли — пустой список
-        if result.boxes is None or len(result.boxes) == 0:
-            return detections
+        if boxes is None or len(boxes) == 0:
+            return []
 
-        for i in range(len(result.boxes)):
-            class_id = int(result.boxes.cls[i])
-            class_name = result.names[class_id]
-            confidence = float(result.boxes.conf[i])
-            bbox = result.boxes.xyxy[i].tolist()
+        cls = boxes.cls.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        xyxy = boxes.xyxy.cpu().numpy()
 
-            detections.append(Detection(
-                class_name=class_name,
-                confidence=confidence,
-                bbox=bbox,
+        return [
+            Detection(
+                class_name=result.names[int(c)],
+                confidence=float(cf),
+                bbox=box.tolist(),
                 frame_index=frame_index,
                 timestamp=timestamp,
-            ))
-
-        return detections
+            )
+            for c, cf, box in zip(cls, conf, xyxy)
+        ]

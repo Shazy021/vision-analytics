@@ -66,9 +66,12 @@ class TestQueueWaitSeconds:
 
 class TestYoloHandleMetrics:
     """Метрики ингресса yolo-consumer: счётчики и queue-wait на пути
-    сообщения через _process_batch (decode в пуле → батч → produce)."""
+    сообщения через _prepare + _infer_and_publish (декод → батч → produce)."""
 
     def _make_consumer(self):
+        import queue
+        import threading
+        from collections import defaultdict
         from concurrent.futures import ThreadPoolExecutor
 
         from app.consumers.yolo_frames import YOLOConsumer
@@ -80,8 +83,17 @@ class TestYoloHandleMetrics:
         c.batch_max = 4
         c.grace_ms = 1
         c.pool = ThreadPoolExecutor(max_workers=2)
+        c.io_pool = ThreadPoolExecutor(max_workers=2)
         c.poison_count = 0
         c.consecutive_failures = 0
+        c._state_lock = threading.Lock()
+        c.inflight_cap = 16
+        c._slots = threading.BoundedSemaphore(16)
+        c.decoded = queue.Queue(maxsize=16)
+        c._part_seq = defaultdict(int)
+        c._pending = defaultdict(dict)
+        c._next_seq = defaultdict(int)
+        c._closing = False
         return c
 
     def _make_msg(self, ts=(1, 1)):
@@ -93,6 +105,8 @@ class TestYoloHandleMetrics:
         }, b"fake-jpeg")  # imdecode замокан
         msg.timestamp.return_value = ts
         msg.error.return_value = None
+        msg.partition.return_value = 0
+        msg.offset.return_value = 0
         return msg
 
     def test_counters_and_queue_wait(self):
@@ -102,7 +116,9 @@ class TestYoloHandleMetrics:
              patch("app.consumers.yolo_frames.frames_received_total") as received, \
              patch("app.consumers.yolo_frames.frame_processed_total") as processed, \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
-            c._process_batch({0: [self._make_msg(ts=(1, ts_ms))]})
+            msg = self._make_msg(ts=(1, ts_ms))
+            meta, frame = c._prepare(msg)
+            c._infer_and_publish([(msg, meta, frame)])
 
         received.inc.assert_called_once()
         processed.labels.assert_called_once_with(result="ok")
@@ -114,7 +130,9 @@ class TestYoloHandleMetrics:
         c = self._make_consumer()
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()), \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
-            c._process_batch({0: [self._make_msg(ts=(0, -1))]})
+            msg = self._make_msg(ts=(0, -1))
+            meta, frame = c._prepare(msg)
+            c._infer_and_publish([(msg, meta, frame)])
         queue.labels.assert_not_called()
 
 

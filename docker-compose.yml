@@ -268,6 +268,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      DETECTION_BATCH_SIZE: ${DETECTION_BATCH_SIZE:-64}
+      DETECTION_BATCH_GRACE_MS: ${DETECTION_BATCH_GRACE_MS:-50}
     depends_on:
       kafka:
         condition: service_healthy

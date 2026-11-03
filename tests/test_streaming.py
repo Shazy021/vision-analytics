@@ -1,17 +1,19 @@
 """Тесты для Kafka streaming модуля"""
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.consumers.yolo_frames import YOLOConsumer
 from app.core.database import Base
 from app.core.frame_envelope import pack
-from app.db.models import Stream
+from app.db.models import Stream, StreamDetection
 from app.streams.manager import MAX_FAST_CRASHES, StreamManager
 
 # ---- Тесты FrameProducer ----
@@ -42,25 +44,40 @@ class TestFrameProducer:
     # ---- Тесты YOLOConsumer ----
 
 class TestYOLOConsumer:
-    """Тесты обработки сообщений YOLO consumer"""
+    """Тесты обработки сообщений YOLO consumer (конвейер: декод → sequencer → батч)"""
 
     def _make_consumer(self):
         """Consumer без __init__ — без Kafka, без YOLO, без сети.
         __new__ создаёт объект, не вызывая конструктор. Обычный трюк
         для тестирования классов с тяжёлой инициализацией."""
+        import queue
+        import threading
+        from collections import defaultdict
+
         c = YOLOConsumer.__new__(YOLOConsumer)
         c.detector = MagicMock()
         c.producer = MagicMock()
         c.consumer = MagicMock()
-        # Атрибуты, которые в бою создаёт __init__ (батчинг + пул IO)
+        # Атрибуты, которые в бою создаёт __init__ (батчинг + пулы + конвейер)
         c.batch_max = 4
         c.grace_ms = 1
         c.pool = ThreadPoolExecutor(max_workers=2)
+        c.io_pool = ThreadPoolExecutor(max_workers=2)
         c.poison_count = 0
         c.consecutive_failures = 0
+        c._state_lock = threading.Lock()
+        c.inflight_cap = 16
+        c._slots = threading.BoundedSemaphore(16)
+        c.decoded = queue.Queue(maxsize=16)
+        c._part_seq = defaultdict(int)
+        c._pending = defaultdict(dict)
+        c._next_seq = defaultdict(int)
+        c._closing = False
         return c
 
     def test_poison_message_is_skipped_not_fatal(self):
+        """Ядовитое сообщение (мусор в конверте): _decode_submit кладёт
+        tombstone, poison учтён, процесс не умирает."""
         consumer = self._make_consumer()
 
         bad_msg = MagicMock()
@@ -69,24 +86,15 @@ class TestYOLOConsumer:
             # msg.error() вернёт MagicMock — а это truthy, и мы уйдём в ветку
             # "Kafka error: continue", не дойдя до обработки. Классическая ловушка.
         bad_msg.topic.return_value = "raw_frames"
-        bad_msg.partition.return_value = 0                 # sorted() по ним
+        bad_msg.partition.return_value = 0
         bad_msg.offset.return_value = 42
 
-        def fake_poll(timeout):
-            # 1-й poll: сообщение; 2-й: пусто (батч собран — очередь холодна);
-            # 3-й: выход из run().
-            fake_poll.calls = getattr(fake_poll, "calls", 0) + 1
-            if fake_poll.calls == 1:
-                return bad_msg
-            if fake_poll.calls == 2:
-                return None
-            raise KeyboardInterrupt
-
-        consumer.consumer.poll.side_effect = fake_poll
-
-        consumer.run()
+        consumer._slots.acquire()  # как в run(): слот берётся до submit
+        consumer._decode_submit(0, bad_msg)
 
         assert consumer.poison_count == 1
+        seq, msg, meta, frame = consumer.decoded.get_nowait()
+        assert meta is None and frame is None  # tombstone — sequencer пройдёт мимо
 
     def _make_bad_msg(self):
         bad_msg = MagicMock()
@@ -99,29 +107,33 @@ class TestYOLOConsumer:
         bad_msg.offset.return_value = 7
         return bad_msg
 
-    def test_sticky_cuda_error_exits_for_restart(self):
+    def test_sticky_cuda_error_exits_for_restart(self, monkeypatch):
         """Липкая CUDA-ошибка — не poison message: процесс обязан выйти,
-        иначе зомби-консумер вечно сжигает offset'ы мёртвым CUDA-контекстом."""
+        иначе зомби-консумер вечно сжигает offset'ы мёртвым CUDA-контекстом.
+        Выход через os._exit (может быть в worker-потоке) — патчим его."""
+        from app.consumers import yolo_frames as yf
+
         consumer = self._make_consumer()
         consumer.detector.detect_batch.side_effect = RuntimeError(
             "CUDA error: unknown error"
         )
 
-        def fake_poll(timeout):
-            fake_poll.calls = getattr(fake_poll, "calls", 0) + 1
-            if fake_poll.calls == 1:
-                return self._make_bad_msg()
-            if fake_poll.calls == 2:
-                return None
-            raise AssertionError("run() должен выйти до следующего poll")
+        class _Exited(BaseException):
+            pass
 
-        consumer.consumer.poll.side_effect = fake_poll
+        monkeypatch.setattr(yf.os, "_exit", lambda code: (_ for _ in ()).throw(_Exited(code)))
 
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
-            with pytest.raises(SystemExit) as exc_info:
-                consumer.run()
-        assert exc_info.value.code == 1
-        consumer.consumer.close.assert_called_once()
+            msg = self._make_bad_msg()
+            meta, frame = consumer._prepare(msg)
+            with pytest.raises(_Exited):
+                consumer._infer_and_publish([(msg, meta, frame)])
+
+        # Фатальный выход случается ДО публикации: ничего не отправлено,
+        # offset не закоммичен — кадры достанут заново после рестарта.
+        assert consumer.poison_count == 0  # это НЕ ядовитое сообщение
+        consumer.producer.flush.assert_not_called()
+        consumer.consumer.commit.assert_not_called()
 
     def test_handle_passes_captured_at_through(self):
         """yolo-consumer обязан пронести captured_at сквозняком: инференс
@@ -137,29 +149,33 @@ class TestYOLOConsumer:
             "captured_at": "2026-10-28T15:00:00+00:00",
         }, b"fake-jpeg")
         msg.error.return_value = None
+        msg.partition.return_value = 0
+        msg.offset.return_value = 7
 
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
-            consumer._process_batch({0: [msg]})
+            meta, frame = consumer._prepare(msg)
+            consumer._infer_and_publish([(msg, meta, frame)])
 
         produced = json.loads(consumer.producer.produce.call_args.kwargs["value"])
         assert produced["captured_at"] == "2026-10-28T15:00:00+00:00"
 
-    def test_consecutive_failures_trigger_restart(self):
+    def test_consecutive_failures_trigger_restart(self, monkeypatch):
         """N подряд не-CUDA падений — тоже выход, а не бесконечный skip."""
+        from app.consumers import yolo_frames as yf
+
         consumer = self._make_consumer()
-        consumer.detector.detect_batch.side_effect = RuntimeError("boom")
-        consumer.detector.detect.side_effect = RuntimeError("boom")
 
-        def fake_poll(timeout):
-            return self._make_bad_msg()
+        class _Exited(BaseException):
+            pass
 
-        consumer.consumer.poll.side_effect = fake_poll
+        monkeypatch.setattr(yf.os, "_exit", lambda code: (_ for _ in ()).throw(_Exited(code)))
 
-        with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
-            with pytest.raises(SystemExit) as exc_info:
-                consumer.run()
-        assert exc_info.value.code == 1
-        assert consumer.poison_count == 10
+        for i in range(yf.MAX_CONSECUTIVE_FAILURES - 1):
+            consumer._mark_failure(ValueError("boom"), "raw_frames", i)
+
+        with pytest.raises(_Exited):
+            consumer._mark_failure(ValueError("boom"), "raw_frames", yf.MAX_CONSECUTIVE_FAILURES - 1)
+        assert consumer.poison_count == yf.MAX_CONSECUTIVE_FAILURES
 
 # ---- Тесты DetectionConsumer ----
 
@@ -275,6 +291,191 @@ class TestDetectionConsumer:
 
             mock_db.rollback.assert_called_once()
             mock_db.close.assert_called_once()
+
+
+# ---- Тесты батчевой записи DetectionConsumer -----------------------------
+
+class TestDetectionConsumerBatch:
+    """Батчевая запись: динамический сбор, bulk INSERT, один коммит,
+    деградация на IntegrityError (и отсутствие двойного учёта метрик)."""
+
+    def _make_consumer(self, batch_max=4, grace_ms=1):
+        from app.consumers.detections import DetectionConsumer
+        c = DetectionConsumer.__new__(DetectionConsumer)
+        c.batch_max = batch_max
+        c.grace_ms = grace_ms
+        c.consumer = MagicMock()
+        c._last_orphan_warn = {}
+        return c
+
+    def _msg(self, partition: int, offset: int, payload):
+        m = MagicMock()
+        m.partition.return_value = partition
+        m.offset.return_value = offset
+        m.value.return_value = payload if isinstance(payload, bytes) else payload.encode()
+        m.error.return_value = None
+        m.timestamp.return_value = (0, -1)  # без CreateTime — queue-wait не меряем
+        return m
+
+    def _payload(self, stream_id=1, frame_index=0, n_objs=1,
+                 captured_at="2026-11-02T12:00:00+00:00"):
+        d = {
+            "stream_id": stream_id,
+            "frame_index": frame_index,
+            "objects": [
+                {"class": "person", "confidence": 0.9,
+                 "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0}}
+                for _ in range(n_objs)
+            ],
+        }
+        if captured_at is not None:
+            d["captured_at"] = captured_at
+        return json.dumps(d)
+
+    @staticmethod
+    def _stored_offsets(consumer_mock) -> list[int]:
+        return [call.kwargs["message"].offset()
+                for call in consumer_mock.store_offsets.call_args_list]
+
+    @staticmethod
+    def _written_results(written_mock) -> list[str]:
+        # result — kwarg ВЫЗОВА labels(); inc() несёт только величину
+        return [call.kwargs["result"] for call in written_mock.labels.call_args_list]
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_write_batch_single_bulk_insert_single_commit(self, mock_session_cls):
+        """Весь батч — ОДИН bulk INSERT и ОДИН commit; offset'ы — по
+        последней message каждой партиции; метрики — только после коммита."""
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer()
+
+        m0 = self._msg(0, 0, self._payload(frame_index=10))
+        m1 = self._msg(0, 1, self._payload(frame_index=11, n_objs=2))
+        m2 = self._msg(1, 0, self._payload(stream_id=2, frame_index=20, captured_at=None))
+
+        with patch("app.consumers.detections.frame_written_total") as written, \
+             patch("app.consumers.detections.frame_e2e_latency_seconds") as e2e, \
+             patch("app.consumers.detections.frame_queue_wait_seconds") as qw:
+            c._write_batch({0: [m0, m1], 1: [m2]})
+
+        # Разворот объектов в строки: 1 + 2 + 1 = 4, одним вызовом
+        args = mock_db.bulk_insert_mappings.call_args.args
+        assert args[0] is StreamDetection
+        assert len(args[1]) == 4
+        assert mock_db.commit.call_count == 1
+        # Строка без captured_at не несёт колонку — не затираем server_default
+        assert "detected_at" not in args[1][3]
+        # Коммит: последние message обеих партиций, один раз
+        assert sorted(self._stored_offsets(c.consumer)) == [0, 1]
+        assert c.consumer.commit.call_count == 1
+        # e2e — только по сообщениям с валидным captured_at (оба — стрим 1)
+        assert e2e.labels.call_count == 2
+        assert e2e.labels.call_args_list[0].kwargs == {"stream_id": "1"}
+        assert sorted(self._written_results(written)) == ["missing_ts", "ok", "ok"]
+        qw.assert_not_called()  # CreateTime в фейках отсутствует
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_write_batch_poison_and_skipped_move_offsets_but_not_rows(self, mock_session_cls):
+        """Яд и сообщения без stream_id не попадают в INSERT, но их
+        offset'ы двигаются — иначе вечный ределивер."""
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer()
+
+        poison = self._msg(0, 0, b"\xff\xfe garbage")
+        skipped = self._msg(0, 1, json.dumps({"frame_index": 1}))
+        clean = self._msg(0, 2, self._payload(frame_index=2))
+
+        with patch("app.consumers.detections.StreamDetection"), \
+             patch("app.consumers.detections.frame_written_total") as written:
+            c._write_batch({0: [poison, skipped, clean]})
+
+        rows = mock_db.bulk_insert_mappings.call_args.args[1]
+        assert len(rows) == 1
+        assert self._stored_offsets(c.consumer) == [2]
+        assert sorted(self._written_results(written)) == ["error", "ok", "skipped"]
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_write_batch_integrity_error_degrades_clean_only(self, mock_session_cls, monkeypatch):
+        """FK-рыв (стрим удалили) рвёт ВЕСЬ батч — деградация идёт
+        по-построчно, но только по «чистым» пейлоадам: яд и skipped уже
+        посчитаны на парсинге, второй прогон удвоил бы их метрики."""
+        mock_db = MagicMock()
+        mock_db.bulk_insert_mappings.side_effect = IntegrityError("stmt", {}, Exception("fk"))
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer()
+
+        poison = self._msg(0, 0, b"garbage")
+        skipped = self._msg(0, 1, json.dumps({"frame_index": 1}))
+        clean_a = self._msg(0, 2, self._payload(frame_index=2))
+        clean_b = self._msg(0, 3, self._payload(frame_index=3))
+
+        spy = MagicMock(return_value="ok")
+        monkeypatch.setattr(c, "_save_to_db", spy)
+
+        with patch("app.consumers.detections.frame_written_total") as written:
+            c._write_batch({0: [poison, skipped, clean_a, clean_b]})
+
+        # ровно два чистых пейлоада, по порядку — без повторов
+        assert spy.call_count == 2
+        assert [call.args[0]["frame_index"] for call in spy.call_args_list] == [2, 3]
+        mock_db.rollback.assert_called_once()
+        assert self._stored_offsets(c.consumer) == [3]
+        assert sorted(self._written_results(written)) == ["error", "skipped"]
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_write_batch_db_down_counts_errors_and_moves_offsets(self, mock_session_cls):
+        """БД легла транзиентно: весь батч — error, но offset'ы двигаются
+        (swallow-and-forward, те же семантики, что у построчного режима)."""
+        mock_db = MagicMock()
+        mock_db.commit.side_effect = RuntimeError("connection lost")
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer()
+
+        m0 = self._msg(0, 0, self._payload(frame_index=1))
+        m1 = self._msg(0, 1, self._payload(frame_index=2, captured_at=None))
+
+        with patch("app.consumers.detections.frame_written_total") as written:
+            c._write_batch({0: [m0, m1]})
+
+        mock_db.rollback.assert_called_once()
+        mock_db.close.assert_called_once()
+        written.labels.assert_called_once_with(result="error")
+        assert written.labels.return_value.inc.call_args.args == (2,)
+        assert self._stored_offsets(c.consumer) == [1]
+
+    def test_collect_batch_hot_until_cold_poll(self):
+        """Горячая очередь (кэш librdkafka) — собираем батч; как только
+        poll замедлился (очередь остыла) — прекращаем сбор и уходим
+        обрабатывать то, что собрали."""
+        c = self._make_consumer(batch_max=10, grace_ms=50)
+
+        queue = [self._msg(0, i, self._payload(frame_index=i)) for i in range(3)]
+        delays = {1: 0.05}  # второй poll «медленный» — очередь остылa
+        calls = {"n": 0}
+
+        def poll(timeout=None):
+            i = calls["n"]
+            calls["n"] += 1
+            if not queue:
+                return None
+            if delays.get(i, 0.0):
+                time.sleep(delays[i])
+            return queue.pop(0)
+
+        c.consumer.poll.side_effect = poll
+        parts = c._collect_batch()
+        assert [m.offset() for p in sorted(parts) for m in parts[p]] == [0, 1]
+        assert len(queue) == 1  # третье сообщение дожидается следующего батча
+
+    def test_collect_batch_empty_within_grace(self):
+        """Пустая тема: не сидим дольше grace-окна."""
+        c = self._make_consumer(grace_ms=5)
+        c.consumer.poll.return_value = None
+        started = time.monotonic()
+        assert c._collect_batch() == {}
+        assert time.monotonic() - started < 0.5
 
 
 # ---- Тесты топиков ----
