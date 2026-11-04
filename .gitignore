@@ -12,6 +12,7 @@ venv/
 *.swp
 *~
 .continue
+.kilo
 
 # OS
 .DS_Store
