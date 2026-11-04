@@ -44,7 +44,7 @@ class TestFrameProducer:
     # ---- Тесты YOLOConsumer ----
 
 class TestYOLOConsumer:
-    """Тесты обработки сообщений YOLO consumer (конвейер: декод → sequencer → батч)"""
+    """Тесты обработки сообщений YOLO consumer (конвейер: декод → батч → watermark-коммит)"""
 
     def _make_consumer(self):
         """Consumer без __init__ — без Kafka, без YOLO, без сети.
@@ -69,15 +69,14 @@ class TestYOLOConsumer:
         c.inflight_cap = 16
         c._slots = threading.BoundedSemaphore(16)
         c.decoded = queue.Queue(maxsize=16)
-        c._part_seq = defaultdict(int)
-        c._pending = defaultdict(dict)
-        c._next_seq = defaultdict(int)
+        c._inflight = defaultdict(set)
+        c._last_seen = {}
         c._closing = False
         return c
 
     def test_poison_message_is_skipped_not_fatal(self):
-        """Ядовитое сообщение (мусор в конверте): _decode_submit кладёт
-        tombstone, poison учтён, процесс не умирает."""
+        """Ядовитое сообщение (мусор в конверте): _decode_submit не эмитит,
+        снимает in-flight, poison учтён, процесс не умирает."""
         consumer = self._make_consumer()
 
         bad_msg = MagicMock()
@@ -90,11 +89,12 @@ class TestYOLOConsumer:
         bad_msg.offset.return_value = 42
 
         consumer._slots.acquire()  # как в run(): слот берётся до submit
-        consumer._decode_submit(0, bad_msg)
+        consumer._enter_inflight(bad_msg)
+        consumer._decode_submit(bad_msg)
 
         assert consumer.poison_count == 1
-        seq, msg, meta, frame = consumer.decoded.get_nowait()
-        assert meta is None and frame is None  # tombstone — sequencer пройдёт мимо
+        assert consumer.decoded.empty()          # tombstone'ов больше нет
+        assert consumer._inflight[0] == set()    # яд не стопорит watermark
 
     def _make_bad_msg(self):
         bad_msg = MagicMock()

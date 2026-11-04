@@ -1,21 +1,21 @@
-"""Kafka Consumer — читает детекции и сохраняет в БД
+"""Kafka Consumer: читает детекции из топика detections и пишет в PostgreSQL.
 
-БАТЧЕВАЯ ЗАПИСЬ (почему потребитель устроен именно так):
-построчный режим (poll → SessionLocal → ORM-объекты → commit на каждое
-сообщение) уперся в количество транзакций: под 100+ fps writer отстаёт от
-yolo-consumer, и лаг копится в топике detections. Теперь:
-  1. динамический сбор батча (та же семантика, что у yolo-consumer: окно
-     grace ограничивает ожидание ПЕРВОГО сообщения, дальше — пока очередь
-     горячая);
-  2. bulk_insert_mappings: один INSERT на батч, без ORM-объектов в памяти;
-  3. ОДИН commit на батч;
-  4. ручной коммит offset'ов Kafka ТОЛЬКО после записи (at-least-once):
-     last_by_partition строится из ВСЕХ сообщений батча — включая ядовитые
-     и skipped, иначе они ределиверились бы вечно.
-IntegrityError (стрим удалили, пока его кадры шли по топикам) рвёт весь
-батч — деградация до построчного _save_to_db: сирота изолируется,
-здоровые кадры проходят. Построчный путь остался и как тестируемая
-единица (см. тесты).
+БАТЧЕВАЯ ЗАПИСЬ (почему именно так). Первый вариант писал по одному
+сообщению: poll → объект ORM → commit. Под 100+ fps писатель не успевал за
+yolo-consumer — слишком много транзакций, и очередь в detections росла.
+Теперь на один батч:
+  1. собираем сообщения динамически (как в yolo-consumer: ждём первое до
+     grace_ms, дальше берём пока очередь «горячая»);
+  2. bulk_insert_mappings — один INSERT на батч, без создания ORM-объектов;
+  3. один commit в БД;
+  4. границу «обработано до N» в Kafka сдвигаем только ПОСЛЕ записи:
+     в неё входят ВСЕ сообщения батча, даже битые и пропущенные — иначе
+     их бы приносило заново бесконечно.
+
+Особый случай: стрим удалили из БД, а его кадры уже ехали по топикам.
+Одна такая строка рвёт FOREIGN KEY и откатывает ВЕСЬ батч — поэтому при
+IntegrityError переписываем батч по одному сообщению: «сирота» отбраковывается,
+остальные строки записываются.
 """
 import json
 import logging
@@ -47,17 +47,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Горячая очередь: poll вернул сообщение почти мгновенно — оно было в
-# локальном кэше librdkafka, бэклог есть, продолжаем собирать батч.
+# «Горячая» очередь: poll вернул сообщение быстрее 5 мс — значит оно лежало
+# в локальном кэше librdkafka, то есть бэклог есть и батч стоит наращивать.
+# Медленнее — очередь опустела, батч пора закрывать.
 HOT_POLL_SECONDS = 0.005
 
 
 def _parse_captured_at(raw: str | None) -> datetime | None:
-    """captured_at из сообщения → naive UTC (тот же стиль, что у now() в колонке).
+    """captured_at из сообщения → datetime без таймзоны (в UTC, как now() в колонке).
 
-    None при отсутствии/битом значении — тогда detected_at поставит
-    server_default (now()), как было до появления captured_at: старые
-    сообщения в топике не должны ломать запись.
+    None (нет поля / битое) — тогда detected_at подставит база сама (now()),
+    как было до появления captured_at: старые сообщения не должны ломать запись.
     """
     if not raw:
         return None
@@ -74,8 +74,8 @@ def _parse_captured_at(raw: str | None) -> datetime | None:
 class DetectionConsumer:
     """Читает детекции из Kafka и пишет в PostgreSQL батчами"""
 
-    # Как часто предупреждать о каждом «осиротевшем» stream_id: кадры
-    # удалённого стрима могут идти сотнями, лог не должен тонуть в них.
+    # Кадры удалённого стрима могут идти сотнями — не тонем в логе:
+    # предупреждаем об одном осиротевшем stream_id не чаще раза в минуту.
     _ORPHAN_WARN_INTERVAL_S = 60.0
 
     def __init__(self, *, batch_max: int | None = None, grace_ms: int | None = None):
@@ -86,9 +86,10 @@ class DetectionConsumer:
             "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
             "group.id": "detection-writer",
             "auto.offset.reset": "earliest",
-            # Ручные коммиты: offset фиксируем только после записи батча
-            # (at-least-once). auto.offset.store выключен — иначе confluent
-            # бросит _INVALID_ARG на store_offsets(message=...).
+            # Границу «обработано до N» двигаем сами, только после записи
+            # батча в БД. Второе переключение — техническое требование
+            # confluent-kafka: при ручном store_offsets автозапись должна
+            # быть выключена, иначе библиотека бросит _INVALID_ARG.
             "enable.auto.commit": False,
             "enable.auto.offset.store": False,
         })
@@ -96,12 +97,12 @@ class DetectionConsumer:
         self._last_orphan_warn: dict[int, float] = {}
 
     def _collect_batch(self) -> dict[int, list]:
-        """Собрать сообщения в батч по партициям (ДИНАМИЧЕСКИЙ батч).
+        """Собрать сообщения в батч, раскладывая их по партициям.
 
-        Окно grace ограничивает ожидание ПЕРВОГО сообщения; дальше батч
-        расширяется, только пока очередь горячая (poll отдаёт из локального
-        кэша почти мгновенно). Под бэклогом набирается за миллисекунды,
-        при низкой нагрузке одиночное сообщение уходит без ожидания.
+        Две фазы, как в yolo-consumer: ждём ПЕРВОЕ сообщение до grace_ms,
+        дальше наращиваем батч, пока poll отвечает мгновенно (очередь
+        горячая). Под нагрузкой батч набирается за миллисекунды, при
+        низкой нагрузке одиночное сообщение не ждёт соседей.
         """
         parts: dict[int, list] = {}
         total = 0
@@ -124,28 +125,28 @@ class DetectionConsumer:
         return parts
 
     def _write_batch(self, parts: dict[int, list]) -> None:
-        """Один батч: парсинг → bulk insert → commit → offset'ы Kafka.
+        """Один батч от начала до конца: разбор → INSERT → commit в БД → граница Kafka.
 
-        Метрики frame_written_total считаются ОДИН раз, когда известен
-        исход: skipped/poison — на парсинге (они не пишутся), ok/missing_ts
-        — после успешного коммита, error — при падении записи.
+        Метрики frame_written_total считаем ОДИН раз, когда известен итог:
+        error/skipped — ещё на разборе (эти строки не пишутся), ok/missing_ts
+        — после успешного commit, error — если запись упала.
         """
         started = time.perf_counter()
         msgs = [m for p in sorted(parts) for m in parts[p]]
-        # ВСЕ сообщения батча участвуют в коммите — включая ядовитые и
-        # skipped: их offset тоже должен двигаться, иначе вечный ределивер.
+        # В границу «обработано до N» входят ВСЕ сообщения батча, даже битые
+        # и пропущенные: их тоже не надо приносить заново бесконечно.
         last_by_partition = {p: parts[p][-1] for p in parts}
 
         mappings: list[dict] = []
-        # Сообщения, прошедшие парсинг И проверку stream_id: именно они
-        # попадают в деградацию при IntegrityError (по ним метрики ещё не
-        # начислены — яд/skipped учтены отдельно и повторно не пишутся).
+        # Сообщения, которые прошли разбор и проверку stream_id — именно они
+        # пойдут в построчную перезапись при IntegrityError (их метрики ещё
+        # не посчитаны; битые и пропущенные учтены отдельно, повторно их
+        # считать нельзя — будет двойка).
         clean_payloads: list[dict] = []
-        # По одному флагу на сообщение с stream_id: True — captured_at
-        # валиден (res=ok), False — missing_ts. Индекс соответствует
-        # порядку в msgs (для сообщений без stream_id флага нет).
+        # По одному флагу на сообщение с stream_id: есть ли валидный
+        # captured_at (для метрики ok vs missing_ts). Порядок = порядок в msgs.
         frame_has_ts: list[bool] = []
-        e2e_samples: list[tuple[str, float]] = []  # (stream_id, captured_epoch)
+        e2e_samples: list[tuple[str, float]] = []  # (stream_id, время захвата)
 
         for msg in msgs:
             wait = queue_wait_seconds(msg)
@@ -155,15 +156,16 @@ class DetectionConsumer:
             try:
                 detection = json.loads(msg.value().decode())
             except (UnicodeDecodeError, json.JSONDecodeError):
-                # Яд: логируем, считаем, идём дальше — батч не роняем.
+                # Битое сообщение: записываем в лог и счётчик, идём дальше —
+                # из-за одного мусора весь батч ронять нельзя.
                 logger.exception("Poison detection message skipped (offset=%s)", msg.offset())
                 frame_written_total.labels(result="error").inc()
                 continue
 
             stream_id = detection.get("stream_id")
             if stream_id is None:
-                # Топик detections — исключительно стримовый (видео пишут в
-                # БД напрямую из video-consumer), stream_id обязателен.
+                # detections — только стримовый топик (загруженные видео
+                # пишутся в БД напрямую из video-consumer), stream_id обязателен.
                 logger.warning("Skipping detection without stream_id: %s", detection)
                 frame_written_total.labels(result="skipped").inc()
                 continue
@@ -182,9 +184,9 @@ class DetectionConsumer:
                     "bbox_x2": obj["bbox"]["x2"],
                     "bbox_y2": obj["bbox"]["y2"],
                 }
-                # Явный None перезаписал бы server_default (now()) на NULL
-                # и получил бы NOT NULL violation — поэтому поле добавляем
-                # только когда время кадра действительно есть.
+                # Временем захвата кадра делимся аккуратно: явный None убил бы
+                # серверный default (now()) и получил бы нарушение NOT NULL —
+                # поэтому поле добавляем только когда время реально есть.
                 if captured_at is not None:
                     fields["detected_at"] = captured_at
                 mappings.append(fields)
@@ -198,28 +200,28 @@ class DetectionConsumer:
                 db.bulk_insert_mappings(StreamDetection, mappings)
                 db.commit()
             except IntegrityError:
-                # Стрим удалили, пока его кадры шли по топикам (raw_frames →
-                # yolo → detections): FK на streams.id рвётся, и падает ВЕСЬ
-                # батч. Деградация до построчного _save_to_db: сирота
-                # изолируется, здоровые кадры проходят.
+                # Одна из причин: стрим удалили из БД, пока его кадры ехали
+                # по топикам. Ссылка на несуществующий стрим откатывает ВЕСЬ
+                # батч — переписываем его по одному сообщению, чтобы
+                # отбраковать только «сироту», а не хорошие строки.
                 db.rollback()
                 logger.warning(
                     "IntegrityError in batch (%d rows) — degrading to per-message",
                     len(mappings),
                 )
-                # Только «чистые» сообщения: яд и skipped уже посчитаны на
-                # парсинге, повторный прогон удвоил бы их метрики.
+                # Только прошедшие разбор сообщения: битые и пропущенные уже
+                # посчитаны на разборе, второй прогон удвоил бы их метрики.
                 for detection in clean_payloads:
                     self._save_to_db(detection)
             except Exception:
                 db.rollback()
                 logger.exception("Error saving batch to DB")
-                # Ни одна строка не записана — все кадры батча: error.
+                # Не записана ни одна строка — весь батч в error.
                 frame_written_total.labels(result="error").inc(len(frame_has_ts))
             else:
-                # Метрики ТОЛЬКО после успешного коммита. e2e = захват →
-                # КОММИТ, поэтому часы берём сейчас, а не в момент парсинга:
-                # время самой транзакции входит в задержку.
+                # Метрики — только после успешного commit. e2e = захват кадра
+                # → КОММИТ в БД, поэтому время берём сейчас: сама транзакция
+                # тоже входит в задержку, которую видит пользователь.
                 now = time.time()
                 for stream_id, captured_epoch in e2e_samples:
                     latency = now - captured_epoch
@@ -230,9 +232,10 @@ class DetectionConsumer:
             finally:
                 db.close()
 
-        # Фиксация offset'ов: после записи (или решения пропустить).
-        # KafkaException = партиция уехала к другому участнику (rebalance):
-        # коммитит её новый владелец, дубли — цена at-least-once.
+        # Граница «обработано до N» — только теперь, когда строки в БД
+        # (или принято решение пропустить). KafkaException = партиция уехала
+        # к другому консьюмеру (rebalance): коммитит её новый владелец,
+        # а нам достанутся дубли — это нормальная цена гарантии.
         try:
             for p in sorted(last_by_partition):
                 self.consumer.store_offsets(message=last_by_partition[p])
@@ -244,12 +247,12 @@ class DetectionConsumer:
         logger.debug("Batch: %d сообщений, %d строк", len(msgs), len(mappings))
 
     def _save_to_db(self, detection: dict) -> str:
-        """Построчная запись (путь деградации батча); вернуть итог для метрик.
+        """Запись одного сообщения (запасной путь, когда батч упал целиком).
 
-        Результат — значение лейбла frame_written_total:
-        ok (записан, captured_at валиден) | missing_ts (записан, но e2e
-        не измерить) | skipped (нет stream_id) | orphan (стрим удалён,
-        кадр выброшен) | error (БД отвалилась).
+        Возвращает итог для метрик — одно из значений лейбла frame_written_total:
+        ok (записан, время кадра есть) | missing_ts (записан, но e2e не
+        померить) | skipped (нет stream_id) | orphan (стрим удалён, кадр не
+        нужен) | error (база отвалилась).
         """
         started = time.perf_counter()
         stream_id = detection.get("stream_id")
@@ -258,9 +261,9 @@ class DetectionConsumer:
             frame_written_total.labels(result="skipped").inc()
             return "skipped"
 
-        # Отдельно от _parse_captured_at (там naive datetime для колонки):
-        # epoch нужен для e2e-задержки; битое/отсутствующее значение — None,
-        # e2e не меряем, но пишем как раньше (fallback на now()).
+        # Здесь нужен именно epoch-секунды (для e2e-задержки), а не datetime
+        # из _parse_captured_at — там формат для колонки. Битое/нет — None:
+        # e2e не мерим, но пишем как раньше (время подставит база).
         captured_epoch = parse_epoch_seconds(detection.get("captured_at"))
 
         db = SessionLocal()
@@ -284,9 +287,8 @@ class DetectionConsumer:
             db.commit()
             logger.debug("Saved %d detections for frame #%s", len(detection.get("objects", [])), detection["frame_index"])
         except IntegrityError:
-            # Стрим удалили, пока его кадры ещё шли по топикам: FK рвётся.
-            # Такой кадр бесполезен (стрима больше нет) — выбрасываем, а не
-            # крутим сообщение в цикле ошибок.
+            # Стрим удалили из БД, а его кадры были в пути. Запись не нужна
+            # (стрима больше нет) — выбрасываем кадр, а не крутим его по кругу.
             db.rollback()
             self._warn_orphan(stream_id, detection.get("frame_index"))
             frame_written_total.labels(result="orphan").inc()
@@ -300,8 +302,9 @@ class DetectionConsumer:
             result = "ok" if captured_epoch is not None else "missing_ts"
             frame_written_total.labels(result=result).inc()
             if captured_epoch is not None:
-                # e2e: захват кадра → коммит. Отрицательное значение — перекос
-                # часов producer'а, мусор в гистограмме портит квантили.
+                # e2e: от захвата кадра до коммита в БД. Отрицательное значение
+                # физически невозможно — это часы producer'а спешат; такое
+                # в гистограмму класть нельзя, испортит квантили.
                 latency = time.time() - captured_epoch
                 if latency >= 0:
                     frame_e2e_latency_seconds.labels(stream_id=str(stream_id)).observe(latency)
@@ -339,7 +342,8 @@ class DetectionConsumer:
 
 
 if __name__ == "__main__":
-    # Порт до коннекта к Kafka: /metrics должен жить даже в ожидании брокера
+    # Порт метрик поднимаем ДО подключения к Kafka: /metrics должен отвечать,
+    # пока консьюмер ждёт брокера (иначе Prometheus считает его мёртвым).
     start_metrics_server(9092)
     consumer = DetectionConsumer()
     consumer.run()

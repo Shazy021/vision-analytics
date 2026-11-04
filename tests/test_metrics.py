@@ -90,9 +90,8 @@ class TestYoloHandleMetrics:
         c.inflight_cap = 16
         c._slots = threading.BoundedSemaphore(16)
         c.decoded = queue.Queue(maxsize=16)
-        c._part_seq = defaultdict(int)
-        c._pending = defaultdict(dict)
-        c._next_seq = defaultdict(int)
+        c._inflight = defaultdict(set)
+        c._last_seen = {}
         c._closing = False
         return c
 

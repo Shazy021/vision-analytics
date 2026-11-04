@@ -1,11 +1,12 @@
-"""Тесты yolo-consumer (конвейер: параллельный декод + sequencer + батчи).
+"""Тесты yolo-consumer (конвейер: параллельный декод + батч + watermark-коммит).
 
 Модель и Kafka замочены: проверяется ЛОГИКА потребителя —
-последовательность sequencer'а (непрерывный префикс партиции, tombstones),
-динамическая сборка батча из decoded-очереди (grace/hot/cold, sentinel),
-один инференс на батч, коммит только после produce+flush, пропуск яда
-без зацикливания, деградация батча до по-кадрового, выход при липкой
-CUDA-ошибке и зомби-пороге.
+min-offset watermark (коммит не перепрыгивает необработанные in-flight,
+проваленный яд не стопорит его), динамическая сборка батча из decoded-
+очереди (grace/hot/cold, sentinel, потолок batch_max), один инференс на
+батч, коммит только после produce+flush, пропуск яда без зацикливания,
+деградация батча до по-кадрового, выход при липкой CUDA-ошибке и
+зомби-пороге.
 """
 import json
 import queue
@@ -49,6 +50,16 @@ def _msg(partition: int, offset: int, jpeg_bytes: bytes, stream_id: int = 7,
     return m
 
 
+def _meta(frame_index: int, stream_id: int = 1) -> dict:
+    return {
+        "frame_index": frame_index,
+        "stream_id": stream_id,
+        "source": "s",
+        "captured_at": None,
+        "frame_bytes": b"",
+    }
+
+
 class FakeConsumer:
     """Выдаёт сообщения из очереди, запоминает store_offsets/commits."""
 
@@ -70,9 +81,12 @@ class FakeConsumer:
             self.delay_next = 0.0
         return self.queue.popleft()
 
-    def store_offsets(self, message=None):
-        # Как настоящий confluent_kafka: message= → коммитится offset+1
-        self.stored.append(message.offset() + 1)
+    def store_offsets(self, offsets=None, message=None):
+        # Как настоящий confluent_kafka: tp.offset — СЛЕДУЮЩИЙ потребляемый offset
+        if offsets is not None:
+            self.stored.extend(tp.offset for tp in offsets)
+        elif message is not None:
+            self.stored.append(message.offset() + 1)
 
     def commit(self, asynchronous=True):
         self.commits += 1
@@ -121,85 +135,96 @@ def consumer(monkeypatch):
     c.io_pool.shutdown(wait=False)
 
 
-# ---- Sequencer ----------------------------------------------------------
+# ---- Min-offset watermark коммит ------------------------------------------
 
-class TestSequencer:
-    """Непрерывный префикс партиции: порядок стрима при любом порядке декода."""
+class TestWatermarkCommit:
+    """Коммит = min(in-flight) - 1: не перепрыгивает необработанное,
+    не стопорится ядом, догоняет при пустом in-flight."""
 
-    def test_out_of_order_decode_releases_contiguous_prefix_only(self, consumer):
+    def test_out_of_order_completion_holds_watermark_at_min(self, consumer):
         c = consumer
-        # Декод финишировал в «кривом» порядке: p0:s0, p1:s0, p0:s2 (!), p0:s1
-        # (seq — per-partition, см. _part_seq в run())
-        c._accept(0, _msg(0, 0, _jpeg(), frame_index=10), {"frame_index": 10}, None)
-        c._accept(0, _msg(1, 0, _jpeg(), frame_index=20), {"frame_index": 20}, None)
-        c._accept(2, _msg(0, 2, _jpeg(), frame_index=12), {"frame_index": 12}, None)
+        msgs = [_msg(0, o, _jpeg(), frame_index=o) for o in (0, 1, 2)]
+        for m in msgs:
+            c._enter_inflight(m)
 
-        batch = c._release_ready()
-        # p0:s2 ждёт p0:s1 — выпускаются только s0 обеих партиций
-        assert [(m.partition(), mm["frame_index"]) for m, mm, _ in batch] == [(0, 10), (1, 20)]
+        # Готовность декода — кривой порядок: 0 и 2 обработаны, 1 ещё in-flight.
+        # Watermark обязан встать на 0 (store 1), не перепрыгивая offset 1.
+        c._infer_and_publish([
+            (msgs[0], _meta(0), None),
+            (msgs[2], _meta(2), None),
+        ])
+        assert c.fc.stored == [1]
+        assert c.fc.commits == 1
 
-        c._accept(1, _msg(0, 1, _jpeg(), frame_index=11), {"frame_index": 11}, None)
-        batch = c._release_ready()
-        # Теперь префикс p0 замыкается: s1, потом s2 — порядок стрима цел
-        assert [(m.partition(), mm["frame_index"]) for m, mm, _ in batch] == [(0, 11), (0, 12)]
+        # Замыкаем дырку: in-flight пуст → watermark = последний увиденный.
+        c._infer_and_publish([(msgs[1], _meta(1), None)])
+        assert c.fc.stored == [1, 3]
 
-    def test_tombstone_advances_sequence(self, consumer):
+    def test_failed_frame_does_not_stall_watermark(self, consumer):
+        """Яд на среднем offset: _decode_submit снимает его с in-flight —
+        watermark идёт дальше, яд не зацикливается доставкой."""
         c = consumer
-        c._accept(0, _msg(0, 0, _jpeg(), frame_index=1), None, None)  # яд
-        c._accept(1, _msg(0, 1, _jpeg(), frame_index=2), {"frame_index": 2}, None)
+        good0 = _msg(0, 0, _jpeg(), frame_index=0)
+        bad1 = _msg(0, 1, b"\xff\xfe\xff garbage", frame_index=1)
+        good2 = _msg(0, 2, _jpeg(), frame_index=2)
+        for m in (good0, bad1, good2):
+            c._enter_inflight(m)
+            c._slots.acquire()  # как в run(): слот берётся до submit
 
-        batch = c._release_ready()
-        assert [mm["frame_index"] for _, mm, _ in batch] == [2]
+        c._decode_submit(bad1)   # яд: ничего не эмитит, снимает in-flight
+        c._decode_submit(good2)  # кадр: в decoded
 
-    def test_release_caps_at_batch_max_proportional(self, consumer):
-        """Выпуск ≤ batch_max, квота пропорциональна глубине префиксов:
-        равная дрень при разной подаче партиций (2–5 стримов на партицию)
-        топит жирные быстрее тощих — латентность растёт с одинаковым
-        темпом у всех только при дрени ∝ backlog."""
-        c = consumer  # batch_max=4
-        for p in (0, 1):
-            for s in range(6):
-                c._accept(s, _msg(p, s, _jpeg(), frame_index=p * 100 + s),
-                          {"frame_index": p * 100 + s}, None)
+        assert c.decoded.qsize() == 1
+        c._infer_and_publish([
+            (good0, _meta(0), None),
+            c.decoded.get_nowait(),
+        ])
+        assert c.fc.stored == [3]  # встал над трупом без задержки
+        assert c.poison_count == 1
 
-        first = c._release_ready()
-        assert len(first) == 4
-        # равные префиксы (6/6) → равные квоты 2+2
-        assert [mm["frame_index"] for _, mm, _ in first] == [0, 1, 100, 101]
+    def test_no_commit_before_anything_seen(self, consumer):
+        """Ни одного poll'а — нечего коммитить: пустой store/commit."""
+        c = consumer
+        c._commit_watermarks()
+        assert c.fc.stored == []
+        assert c.fc.commits == 0
 
-        second = c._release_ready()
-        assert [mm["frame_index"] for _, mm, _ in second] == [2, 3, 102, 103]
+    def test_watermark_per_partition(self, consumer):
+        """Watermark партиции независим: in-flight p1 не тормозит p0."""
+        c = consumer
+        p0 = _msg(0, 5, _jpeg(), frame_index=5)
+        p1 = _msg(1, 9, _jpeg(), frame_index=9)
+        c._enter_inflight(p0)
+        c._enter_inflight(p1)
 
-        third = c._release_ready()
-        assert [mm["frame_index"] for _, mm, _ in third] == [4, 5, 104, 105]
-        assert c._release_ready() == []
-
-    def test_release_quota_follows_prefix_depth(self, consumer):
-        """Партиция с трёхкратным завалом получает трёхкратную квоту."""
-        c = consumer  # batch_max=4
-        for s in range(12):
-            c._accept(s, _msg(0, s, _jpeg(), frame_index=s), {"frame_index": s}, None)
-        for s in range(4):
-            c._accept(s, _msg(1, s, _jpeg(), frame_index=100 + s), {"frame_index": 100 + s}, None)
-
-        batch = c._release_ready()
-        # префиксы 12/4 → квоты 3/1
-        assert [mm["frame_index"] for _, mm, _ in batch] == [0, 1, 2, 100]
+        c._infer_and_publish([(p0, _meta(5), None)])
+        # p0 закрыт (store 6), p1 ещё in-flight на 9 → store 9 (водораздел 8)
+        assert Counter(c.fc.stored) == Counter([6, 9])
 
 
-# ---- Сборка батча из decoded-очереди -------------------------------------
+# ---- Сборка батча из decoded-очереди ---------------------------------------
 
 class TestCollectDecoded:
     def test_hot_queue_drains_into_one_batch(self, consumer):
         c = consumer
-        # seq per-partition: p0 получает 0,1; p1 — 0
-        c.decoded.put((0, _msg(0, 0, _jpeg(), frame_index=0), {"frame_index": 0}, None))
-        c.decoded.put((0, _msg(1, 0, _jpeg(), frame_index=1), {"frame_index": 1}, None))
-        c.decoded.put((1, _msg(0, 1, _jpeg(), frame_index=2), {"frame_index": 2}, None))
+        for i in range(3):
+            c.decoded.put((_msg(0, i, _jpeg(), frame_index=i), _meta(i), None))
 
         batch = c._collect_decoded()
-        # Квоты ∝ префиксам: p0 (2 кадра) > p1 (1) → p0 вперёд
-        assert [mm["frame_index"] for _, mm, _ in batch] == [0, 2, 1]
+        # Порядок — FIFO готовности декода, без переупорядочивания
+        assert [mm["frame_index"] for _, mm, _ in batch] == [0, 1, 2]
+
+    def test_batch_capped_at_batch_max(self, consumer):
+        """Потолок batch_max: один detect_batch на десятки 1080p-кадров —
+        гигабайтные пики RAM (float32-тензоры препроцессинга), которые
+        аллокатор torch не отдаёт ОС."""
+        c = consumer  # batch_max=4
+        for i in range(10):
+            c.decoded.put((_msg(0, i, _jpeg(), frame_index=i), _meta(i), None))
+
+        batch = c._collect_decoded()
+        assert len(batch) == 4
+        assert c.decoded.qsize() == 6
 
     def test_cold_queue_respects_grace_and_returns_empty(self, consumer):
         c = consumer
@@ -214,32 +239,22 @@ class TestCollectDecoded:
         c.decoded.put(None)
         assert c._collect_decoded() is None
 
-    def test_absorb_stops_at_pending_cap(self, consumer):
-        """pending ≤ inflight_cap: без потолка absorb перекладывал в него
-        весь decoded, а release отдаёт по batch_max — под перегрузкой
-        кадры оседали в словарях консьюмера минутами (e2e p95 24с при
-        пустом Kafka). Теперь лишнее ждёт в decoded — там его видит
-        queue_wait и держит RAM под семафором слотов."""
-        c = consumer  # inflight_cap = 8×4 = 32
-        # Юнит-тест ceiling'а absorb: нужен завал глубже maxsize decoded
-        # (в проде глубина ограничена сверху тем же inflight_cap и
-        # backpressure _emit — это покрыто TestEmitBackpressure).
-        c.decoded = queue.Queue()
-        for i in range(40):
-            c.decoded.put((i, _msg(0, i, _jpeg(), frame_index=i),
-                           {"frame_index": i}, None))
-
-        c._absorb_buffered()
-        assert c._pending_count() == c.inflight_cap
-        assert c.decoded.qsize() == 40 - c.inflight_cap
+    def test_sentinel_mid_drain_drops_batch(self, consumer):
+        """Sentinel после первых кадров: собранный сбрасывается — offset'ы
+        не закоммичены, брокер отдаст кадры после рестарта (at-least-once)."""
+        c = consumer
+        c.decoded.put((_msg(0, 0, _jpeg(), frame_index=0), _meta(0), None))
+        c.decoded.put(None)
+        assert c._collect_decoded() is None
+        assert c._closing is True
 
 
 # ---- Backpressure decoded-очереди ------------------------------------------
 
 class TestEmitBackpressure:
-    """Потеря seq навсегда стопорит непрерывный префикс партиции в
-    sequencer'е (lag растёт вечно — этот stall ловили в бенче на догоне
-    бэклога после рестарта), поэтому _emit ждёт, а не дропает."""
+    """Бэклог обязан жить в Kafka (диск брокера, виден в queue_wait), а не
+    в RAM консьюмера: _emit ждёт место в decoded, слоты держат poll.
+    Дроп — только на шатдауне: offset не закоммичен, кадр доставится заново."""
 
     def test_full_queue_blocks_instead_of_dropping(self, consumer):
         c = consumer
@@ -271,18 +286,19 @@ class TestEmitBackpressure:
         assert c.decoded.get_nowait() == ("fill",)  # дропнут именно новый кадр
 
 
-# ---- Инференс и публикация ------------------------------------------------
+# ---- Инференс и публикация --------------------------------------------------
 
 def test_cross_partition_batch_single_inference_and_commit(consumer):
-    """Батч со ВСЕХ партиций — ОДИН вызов detect_batch; порядок внутри
-    партиции сохраняется, коммит — один на батч, offset'ы по последней
-    message каждой партиции."""
+    """Батч со ВСЕХ партиций — ОДИН вызов detect_batch; коммит — один на
+    батч, watermark каждой партиции по её in-flight/last_seen."""
     c = consumer
     pairs = [
-        (_msg(0, 0, _jpeg(), frame_index=10), {"frame_index": 10, "stream_id": 1, "source": "s", "captured_at": None, "frame_bytes": b""}, None),
-        (_msg(0, 1, _jpeg(), frame_index=11), {"frame_index": 11, "stream_id": 1, "source": "s", "captured_at": None, "frame_bytes": b""}, None),
-        (_msg(1, 0, _jpeg(), frame_index=20), {"frame_index": 20, "stream_id": 2, "source": "s", "captured_at": None, "frame_bytes": b""}, None),
+        (_msg(0, 0, _jpeg(), frame_index=10), _meta(10), None),
+        (_msg(0, 1, _jpeg(), frame_index=11), _meta(11), None),
+        (_msg(1, 0, _jpeg(), frame_index=20), _meta(20, 2), None),
     ]
+    for msg, _m, _f in pairs:
+        c._enter_inflight(msg)
 
     c._infer_and_publish(pairs)
 
@@ -294,23 +310,25 @@ def test_cross_partition_batch_single_inference_and_commit(consumer):
     indices = sorted(json.loads(v)["frame_index"] for _, v in c.fp.sent)
     assert indices == [10, 11, 20]
 
+    # in-flight пуст → watermark = last_seen: p0 закрывает offset 1, p1 — 0
     assert Counter(c.fc.stored) == Counter([2, 1])
     assert c.fc.commits == 1
 
 
-def test_decode_failure_becomes_tombstone_and_poison(consumer):
-    """Ядовитое сообщение: _decode_submit кладёт tombstone (sequencer
-    пройдёт мимо), poison учтён, слот освобождён."""
+def test_decode_failure_skipped_and_poisoned(consumer):
+    """Ядовитое сообщение: _decode_submit НЕ эмитит (tombstone'ов больше
+    нет), снимает in-flight, poison учтён, слот освобождён."""
     c = consumer
     before = _poison_metric_value()
     bad = _msg(0, 1, b"\xff\xfe\xff garbage", frame_index=2)
 
     # Контракт: слот занимает main-поток ДО submit (см. run())
+    c._enter_inflight(bad)
     c._slots.acquire()
-    c._decode_submit(0, bad)
+    c._decode_submit(bad)
 
-    seq, msg, meta, frame = c.decoded.get_nowait()
-    assert meta is None and frame is None  # tombstone
+    assert c.decoded.empty()  # tombstone не нужен: дырки seq больше нет
+    assert c._inflight[0] == set()  # яд не тормозит watermark
     assert _poison_metric_value() - before == 1
     assert c.consecutive_failures == 1
 
@@ -321,9 +339,11 @@ def test_batch_failure_degrades_to_per_frame(consumer):
     c = consumer
     c.det.detect_batch.side_effect = RuntimeError("transient GPU hiccup")
     pairs = [
-        (_msg(0, 0, _jpeg(), frame_index=1), {"frame_index": 1, "stream_id": 1, "source": "s", "captured_at": None, "frame_bytes": b""}, None),
-        (_msg(0, 1, _jpeg(), frame_index=2), {"frame_index": 2, "stream_id": 1, "source": "s", "captured_at": None, "frame_bytes": b""}, None),
+        (_msg(0, 0, _jpeg(), frame_index=1), _meta(1), None),
+        (_msg(0, 1, _jpeg(), frame_index=2), _meta(2), None),
     ]
+    for msg, _m, _f in pairs:
+        c._enter_inflight(msg)
 
     c._infer_and_publish(pairs)
 
@@ -340,8 +360,10 @@ def test_rebalance_during_batch_tolerated(consumer):
 
     c.fc.store_offsets = MagicMock(side_effect=KafkaException())
     pairs = [
-        (_msg(0, 0, _jpeg(), frame_index=1), {"frame_index": 1, "stream_id": 1, "source": "s", "captured_at": None, "frame_bytes": b""}, None),
+        (_msg(0, 0, _jpeg(), frame_index=1), _meta(1), None),
     ]
+    for msg, _m, _f in pairs:
+        c._enter_inflight(msg)
 
     c._infer_and_publish(pairs)  # не должно бросить
 
@@ -359,8 +381,10 @@ def test_fatal_cuda_error_exits_process(consumer, monkeypatch):
 
     c.det.detect_batch.side_effect = _FakeAcceleratorError("CUDA error: unknown")
     pairs = [
-        (_msg(0, 0, _jpeg(), frame_index=1), {"frame_index": 1, "stream_id": 1, "source": "s", "captured_at": None, "frame_bytes": b""}, None),
+        (_msg(0, 0, _jpeg(), frame_index=1), _meta(1), None),
     ]
+    for msg, _m, _f in pairs:
+        c._enter_inflight(msg)
 
     class _Exited(BaseException):
         pass
