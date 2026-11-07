@@ -47,20 +47,22 @@ class TestYOLOConsumer:
     """Тесты обработки сообщений YOLO consumer (конвейер: декод → батч → watermark-коммит)"""
 
     def _make_consumer(self):
-        """Consumer без __init__ — без Kafka, без YOLO, без сети.
+        """Consumer без __init__ — без Kafka, без Triton, без сети.
         __new__ создаёт объект, не вызывая конструктор. Обычный трюк
         для тестирования классов с тяжёлой инициализацией."""
+        import itertools
         import queue
         import threading
-        from collections import defaultdict
+        from collections import defaultdict, deque
 
         c = YOLOConsumer.__new__(YOLOConsumer)
         c.detector = MagicMock()
         c.producer = MagicMock()
         c.consumer = MagicMock()
-        # Атрибуты, которые в бою создаёт __init__ (батчинг + пулы + конвейер)
-        c.batch_max = 4
-        c.grace_ms = 1
+        # Атрибуты, которые в бою создаёт __init__ (async-конвейер + watermark)
+        c.window = 16
+        c.channels = 2
+        c.send_workers = 2
         c.pool = ThreadPoolExecutor(max_workers=2)
         c.io_pool = ThreadPoolExecutor(max_workers=2)
         c.poison_count = 0
@@ -69,10 +71,27 @@ class TestYOLOConsumer:
         c.inflight_cap = 16
         c._slots = threading.BoundedSemaphore(16)
         c.decoded = queue.Queue(maxsize=16)
+        c._win_slots = threading.BoundedSemaphore(16)
         c._inflight = defaultdict(set)
         c._last_seen = {}
+        c._committed = {}
+        c._pending = {}
+        c._pending_lock = threading.Lock()
+        c._corr_seq = itertools.count(1)
+        c._ready = []
+        c._uploads = deque()
         c._closing = False
         return c
+
+    @staticmethod
+    def _complete(consumer, msg, meta, dets):
+        """Провести кадр через async-контур как _submit_frame + ответ Triton'а:
+        corr регистрируется ДО отправки (порядок из _submit_frame)."""
+        corr = next(consumer._corr_seq)
+        consumer._pending[corr] = (msg, meta, time.perf_counter())
+        consumer._win_slots.acquire()
+        consumer._handle_result(corr, dets)
+        consumer._publish_ready()
 
     def test_poison_message_is_skipped_not_fatal(self):
         """Ядовитое сообщение (мусор в конверте): _decode_submit не эмитит,
@@ -96,50 +115,10 @@ class TestYOLOConsumer:
         assert consumer.decoded.empty()          # tombstone'ов больше нет
         assert consumer._inflight[0] == set()    # яд не стопорит watermark
 
-    def _make_bad_msg(self):
-        bad_msg = MagicMock()
-        bad_msg.value.return_value = pack(
-            {"frame_index": 1, "source": "s", "stream_id": 1}, b"fake-jpeg"
-        )
-        bad_msg.error.return_value = None
-        bad_msg.topic.return_value = "raw_frames"
-        bad_msg.partition.return_value = 0                 # sorted() по ним
-        bad_msg.offset.return_value = 7
-        return bad_msg
-
-    def test_sticky_cuda_error_exits_for_restart(self, monkeypatch):
-        """Липкая CUDA-ошибка — не poison message: процесс обязан выйти,
-        иначе зомби-консумер вечно сжигает offset'ы мёртвым CUDA-контекстом.
-        Выход через os._exit (может быть в worker-потоке) — патчим его."""
-        from app.consumers import yolo_frames as yf
-
-        consumer = self._make_consumer()
-        consumer.detector.detect_batch.side_effect = RuntimeError(
-            "CUDA error: unknown error"
-        )
-
-        class _Exited(BaseException):
-            pass
-
-        monkeypatch.setattr(yf.os, "_exit", lambda code: (_ for _ in ()).throw(_Exited(code)))
-
-        with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
-            msg = self._make_bad_msg()
-            meta, frame = consumer._prepare(msg)
-            with pytest.raises(_Exited):
-                consumer._infer_and_publish([(msg, meta, frame)])
-
-        # Фатальный выход случается ДО публикации: ничего не отправлено,
-        # offset не закоммичен — кадры достанут заново после рестарта.
-        assert consumer.poison_count == 0  # это НЕ ядовитое сообщение
-        consumer.producer.flush.assert_not_called()
-        consumer.consumer.commit.assert_not_called()
-
     def test_handle_passes_captured_at_through(self):
         """yolo-consumer обязан пронести captured_at сквозняком: инференс
         и очередь не должны сдвигать время детекции."""
         consumer = self._make_consumer()
-        consumer.detector.detect_batch.return_value = [[]]
 
         msg = MagicMock()
         msg.value.return_value = pack({
@@ -153,8 +132,8 @@ class TestYOLOConsumer:
         msg.offset.return_value = 7
 
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()):
-            meta, frame = consumer._prepare(msg)
-            consumer._infer_and_publish([(msg, meta, frame)])
+            meta, _prepared = consumer._prepare(msg)
+            self._complete(consumer, msg, meta, [])
 
         produced = json.loads(consumer.producer.produce.call_args.kwargs["value"])
         assert produced["captured_at"] == "2026-10-28T15:00:00+00:00"

@@ -1,34 +1,26 @@
 # ============================================================
 # Vision Analytics Platform — команды разработчика
 #
-#   make up      — поднять весь стек (GPU определяется автоматически)
+#   make up      — поднять весь стек
 #   make help    — список всех команд
 #
-# Авто-детект GPU: если nvidia-smi доступен и видит карту, up добавляет
-# override-файл docker-compose.gpu.yml (резервирование видеокарт).
-# Без NVIDIA стек поднимается на CPU — тот же файл, те же команды.
+# GPU нужен одному сервису — triton (TensorRT engine, единственный инференс
+# платформы). Консьюмеры обращаются к нему по docker-сети, поэтому override-
+# файлы с GPU-резервами больше не нужны: всё описано в docker-compose.yml.
 # ============================================================
-
-# --- Автоопределение GPU -------------------------------------------
-# nvidia-smi -L печатает список карт; пустой вывод = GPU нет
-GPU := $(shell nvidia-smi -L 2>/dev/null)
 
 # Ролик-источник для бенчмарка: один и тот же между прогонами —
 # иначе прогоны несравнимы (bench/README.md, «Ограничения»)
 BENCH_VIDEO ?= uploads/Praha_air.mp4
 
-ifeq ($(GPU),)
 COMPOSE_FILES = -f docker-compose.yml
-else
-COMPOSE_FILES = -f docker-compose.yml -f docker-compose.gpu.yml
-endif
 
 .PHONY: help up down restart logs ps build migrate test lint bench clean
 
 help: ## Показать список команд
 	@echo "Vision Analytics Platform — команды:"
 	@echo ""
-	@echo "  make up       поднять весь стек (GPU детектится автоматически)"
+	@echo "  make up       поднять весь стек (нужен NVIDIA GPU для triton)"
 	@echo "  make down     остановить стек"
 	@echo "  make restart  перезапустить стек"
 	@echo "  make logs     логи всех сервисов (stream)"
@@ -39,10 +31,8 @@ help: ## Показать список команд
 	@echo "  make lint     ruff-проверка (нужен локальный venv)"
 	@echo "  make bench    vision-bench: ёмкость и узкое место стримов (нужен venv + стек)"
 	@echo "  make clean    остановить и удалить контейнеры/тома (ОСТОРОЖНО: данные)"
-	@echo ""
-	@echo "GPU: $(if $(GPU),найден → $(GPU),не найден → запуск на CPU)"
 
-up: ## Поднять все сервисы (с GPU-override, если есть NVIDIA)
+up: ## Поднять все сервисы (triton требует NVIDIA GPU)
 	docker compose $(COMPOSE_FILES) up -d
 	@echo ""
 	@echo "Поднято. Dashboard: http://localhost:8501 | Swagger: http://localhost:8000/docs"

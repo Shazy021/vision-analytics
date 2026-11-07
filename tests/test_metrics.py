@@ -4,6 +4,7 @@ queue-wait из broker timestamp, лейблы результатов и enqueue
 Метрики — только счётчики в памяти, GPU/torch/Kafka не нужны.
 """
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -66,22 +67,23 @@ class TestQueueWaitSeconds:
 
 class TestYoloHandleMetrics:
     """Метрики ингресса yolo-consumer: счётчики и queue-wait на пути
-    сообщения через _prepare + _infer_and_publish (декод → батч → produce)."""
+    сообщения через _prepare + async-контур (декод → submit → ответ → produce)."""
 
     def _make_consumer(self):
+        import itertools
         import queue
         import threading
-        from collections import defaultdict
+        from collections import defaultdict, deque
         from concurrent.futures import ThreadPoolExecutor
 
         from app.consumers.yolo_frames import YOLOConsumer
         c = YOLOConsumer.__new__(YOLOConsumer)
         c.detector = MagicMock()
-        c.detector.detect_batch.return_value = [[]]
         c.producer = MagicMock()
         c.consumer = MagicMock()
-        c.batch_max = 4
-        c.grace_ms = 1
+        c.window = 16
+        c.channels = 2
+        c.send_workers = 2
         c.pool = ThreadPoolExecutor(max_workers=2)
         c.io_pool = ThreadPoolExecutor(max_workers=2)
         c.poison_count = 0
@@ -90,10 +92,26 @@ class TestYoloHandleMetrics:
         c.inflight_cap = 16
         c._slots = threading.BoundedSemaphore(16)
         c.decoded = queue.Queue(maxsize=16)
+        c._win_slots = threading.BoundedSemaphore(16)
         c._inflight = defaultdict(set)
         c._last_seen = {}
+        c._committed = {}
+        c._pending = {}
+        c._pending_lock = threading.Lock()
+        c._corr_seq = itertools.count(1)
+        c._ready = []
+        c._uploads = deque()
         c._closing = False
         return c
+
+    @staticmethod
+    def _complete(c, msg, meta, dets):
+        """Провести кадр через async-контур как _submit_frame + ответ Triton'а."""
+        corr = next(c._corr_seq)
+        c._pending[corr] = (msg, meta, time.perf_counter())
+        c._win_slots.acquire()
+        c._handle_result(corr, dets)
+        c._publish_ready()
 
     def _make_msg(self, ts=(1, 1)):
         msg = MagicMock()
@@ -116,8 +134,8 @@ class TestYoloHandleMetrics:
              patch("app.consumers.yolo_frames.frame_processed_total") as processed, \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
             msg = self._make_msg(ts=(1, ts_ms))
-            meta, frame = c._prepare(msg)
-            c._infer_and_publish([(msg, meta, frame)])
+            meta, _prepared = c._prepare(msg)
+            self._complete(c, msg, meta, [])
 
         received.inc.assert_called_once()
         processed.labels.assert_called_once_with(result="ok")
@@ -130,8 +148,8 @@ class TestYoloHandleMetrics:
         with patch("app.consumers.yolo_frames.cv2.imdecode", return_value=MagicMock()), \
              patch("app.consumers.yolo_frames.frame_queue_wait_seconds") as queue:
             msg = self._make_msg(ts=(0, -1))
-            meta, frame = c._prepare(msg)
-            c._infer_and_publish([(msg, meta, frame)])
+            meta, _prepared = c._prepare(msg)
+            self._complete(c, msg, meta, [])
         queue.labels.assert_not_called()
 
 
@@ -360,7 +378,7 @@ class TestChunkTimings:
         detector = MagicMock()
         detector.detect.return_value = []
         try:
-            with patch.object(processor, "YOLODetector", return_value=detector), \
+            with patch.object(processor, "TritonDetector", return_value=detector), \
                  patch("app.processing.processor.frame_chunk_decode_duration_seconds") as dec, \
                  patch("app.processing.processor.frame_chunk_inference_duration_seconds") as inf, \
                  patch("app.processing.processor.frame_chunk_write_duration_seconds") as wr:

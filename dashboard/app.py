@@ -382,7 +382,7 @@ def search_params_caption(extract_fps=None, max_frames=None, native_fps=None) ->
     if not ef:
         return ""
     limit = ("без лимита" if not mf
-             else f"лимит {mf} прочитанных кадров")
+             else f"лимит {mf} прочитанных кадров с начала видео")
     rate = ("КАЖДЫЙ кадр" if native_fps and ef >= native_fps
             else f"~{ef} раз/с")
     return f"🔎 Детекции ищем {rate}, {limit}."

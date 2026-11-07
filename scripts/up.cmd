@@ -12,7 +12,7 @@ REM   scripts\up.cmd down            stop
 REM   scripts\up.cmd logs            follow logs
 REM   scripts\up.cmd ps              service status
 REM
-REM GPU is auto-detected via nvidia-smi (see up.ps1).
+REM triton (inference) needs an NVIDIA GPU; up.ps1 warns if none is found.
 REM ============================================================
 setlocal
 set "SCRIPT_DIR=%~dp0"

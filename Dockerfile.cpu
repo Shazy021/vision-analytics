@@ -1,20 +1,22 @@
 # ============================================================
-# CPU-образ: api, detection-consumer, stream-manager, dashboard.
+# Единый образ платформы: api, dashboard, detection-consumer,
+# stream-manager, video-consumer, yolo-consumer.
 #
-# Отличие от Dockerfile: без torch/ultralytics (extra gpu) — инференс
-# нужен только video-consumer и yolo-consumer, они собираются из
-# Dockerfile (CUDA). Так 4 из 6 сервисов занимают ~2 GB вместо 10.6 GB
-# каждый, а их пересборка занимает минуты, а не час.
+# torch/ultralytics в образе нет вовсе: инференс живёт в отдельном
+# Triton-сервере (TensorRT engine), консьюмерам нужен только лёгкий
+# gRPC-клиент (extra triton). Так ВСЕ сервисы занимают ~2 GB вместо
+# 10.6 GB у CUDA-образа, а пересборка занимает минуты, а не час.
 # ============================================================
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# Кэш слоя: манифест зависимостей + заглушка пакета (см. Dockerfile).
-# Extra dash — дашборд живёт в этом образе; gpu сюда НЕ попадает.
+# Кэш слоя: копируем ТОЛЬКО манифест зависимостей + заглушку пакета.
+# Пока manifest не меняется — слой с зависимостями не пересобирается.
+# Extra dash — дашборд живёт в этом же образе.
 COPY pyproject.toml ./
 COPY app/__init__.py app/
-RUN pip install --no-cache-dir ".[dash]"
+RUN pip install --no-cache-dir ".[dash,triton]"
 
 FROM python:3.12-slim
 

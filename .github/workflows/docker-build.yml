@@ -31,35 +31,5 @@ jobs:
       - name: Smoke test (imports inside the built image)
         run: |
           docker run --rm --entrypoint python vap-cpu:ci \
-            -c "import cv2, numpy; import app.main; print('cpu image smoke: OK')"
-
-  build-cuda:
-    name: Build CUDA image
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-            /usr/local/.ghc-overlay /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost /usr/lib/jvm /usr/share/swift
-          sudo docker image prune --all --force
-          df -h /
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build vap-cuda
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          tags: vap-cuda:ci
-          load: true
-          provenance: false
-
-      - name: Smoke test (imports inside the built image)
-        run: |
-          docker run --rm --entrypoint python vap-cuda:ci \
-            -c "import cv2, numpy, ultralytics; print('cuda image smoke: OK')"
+            -c "import cv2, numpy, tritonclient.grpc; import app.main; \
+                import app.processing.processor; print('image smoke: OK')"

@@ -14,10 +14,15 @@ N открытий потока и seek'ов на коротком ролике 
 параллельности.
 """
 import logging
+import math
 
 import cv2
 
 logger = logging.getLogger(__name__)
+
+# Допуск для сравнений на границах сетки: float-арифметика (k*interval)
+# не должна «откусывать» отметку, лежащую ровно на границе чанка.
+EPS_S = 1e-6
 
 
 def probe_media(source: str) -> tuple[float, float] | None:
@@ -63,21 +68,41 @@ def plan_chunks(duration_s: float, chunk_sec: float) -> list[tuple[float, float]
     return chunks
 
 
-def allocate_sample_budgets(num_chunks: int, total_budget: int) -> list[int]:
+def chunk_mark_capacity(start_s: float, end_s: float, interval: float) -> int:
+    """Число отметок сетки k*interval в [start_s, end_s) — ёмкость чанка.
+
+    Та же формула, что next_mark/last_mark в _decode_chunk: если меняется
+    одна, обязана измениться и другая, иначе диспетчер и воркер по-разному
+    считают, сколько сэмплов влезает в чанк.
+    """
+    if interval <= 0 or end_s <= start_s:
+        return 0
+    first = max(0, math.ceil(start_s / interval - EPS_S))
+    last = math.floor((end_s - EPS_S) / interval)
+    return max(0, last - first + 1)
+
+
+def allocate_sample_budgets(chunks: list[tuple[float, float]],
+                            total_budget: int, interval: float) -> list[int]:
     """Распределить ГЛОБАЛЬНЫЙ бюджет сэмплов (max_frames // step) по чанкам.
 
-    total_budget <= 0 — лимита нет (пустой список). Бюджет делится
-    пропорционально числу чанков с остатком первым чанкам; если бюджета
-    меньше, чем чанков, — round-robin (часть чанков получит 0 сэмплов).
+    Лимит означает «ПЕРВЫЕ N кадров», а не «N кадров на всё видео»: бюджет
+    расходуется с головы видео — ранние чанки берут сколько могут (до ёмкости
+    своей сетки), следующие — остаток, чанки за бюджетом получают 0. Такие
+    чанки диспетчер вообще не ставит в очередь, а воркер при redelivery
+    пропускает, не открывая поток (budget=0 у _decode_chunk — это «без
+    лимита», поэтому ноль сюда не передаётся вовсе).
+
+    total_budget <= 0 — лимита нет (пустой список).
     """
-    if num_chunks <= 0 or total_budget <= 0:
+    if not chunks or total_budget <= 0:
         return []
-    if total_budget >= num_chunks:
-        base, rem = divmod(total_budget, num_chunks)
-        return [base + (1 if i < rem else 0) for i in range(num_chunks)]
-    budgets = [0] * num_chunks
-    for i in range(total_budget):
-        budgets[i % num_chunks] += 1
+    budgets: list[int] = []
+    remaining = total_budget
+    for start_s, end_s in chunks:
+        take = min(chunk_mark_capacity(start_s, end_s, interval), remaining)
+        budgets.append(take)
+        remaining -= take
     return budgets
 
 

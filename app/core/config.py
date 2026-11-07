@@ -11,40 +11,33 @@
 """
 import logging
 
-from pydantic import ConfigDict, field_validator
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
-
-
-def _detect_device() -> str:
-    """
-    Автоопределение устройства для инференса: cuda, если есть GPU, иначе cpu.
-
-    Зачем: дефолт DEVICE=cuda валил проект на любой машине без NVIDIA
-    (рекрутер клонировал репо — и ничего не запустилось). С "auto" проект
-    заводится везде: на машине с NVIDIA автоматически берётся GPU,
-    без неё — CPU. Никаких ручных правок конфига после клона.
-    """
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:  # torch не установлен или драйвер недоступен — это не ошибка
-        pass
-    return "cpu"
 
 
 class Settings(BaseSettings):
     # --- База данных ---
     database_url: str = "postgresql://user:pass@localhost:5432/vision"
 
-    # --- YOLO ---
-    weights_path: str = "yolov8n.pt"  # n = nano, самая маленькая и быстрая модель
-    device: str = "auto"  # auto | cpu | cuda | 0 | 1 — "auto" резолвится при старте
+    # --- Детекция ---
     extract_fps: int = 5
-    max_frames: int = 300  # 0 = без лимита, иначе обработать только N кадров
+    max_frames: int = 300  # 0 = без лимита, иначе обработать только первые N прочитанных кадров
+
+    # --- Инференс: только Triton Inference Server ---
+    # Модель (TensorRT engine с вшитым NMS) живёт в отдельном Triton-сервере,
+    # консьюмерам нужны только numpy + лёгкий gRPC-клиент, GPU держит один
+    # Triton на все трассы и реплики. Без поднятого Triton детекции нет ни у
+    # видео, ни у стримов — это обязательная часть стека.
+    # Адрес Triton для gRPC: в docker-сети это "triton:8001" (имя сервиса),
+    # с хоста — "localhost:18001" (порт standalone-контейнера).
+    triton_url: str = "triton:8001"
+    triton_model_name: str = "yolo_detector"
+    # Сколько независимых gRPC-каналов держит клиент Triton. Один канал
+    # сериализует крупные запросы (~110 req/s потолок), потокам отправки
+    # нужно несколько — см. комментарий в triton_detector.py.
+    triton_channels: int = 4
 
     # --- Чанкование видео ---
     # Длинные видео режутся на чанки по времени, которые параллельно берут
@@ -56,17 +49,16 @@ class Settings(BaseSettings):
     video_min_chunk_duration: float = 45.0
 
     # --- YOLO consumer: пропускная способность raw_frames ---
-    # Микро-батч: сколько кадров собрать со всех партиций перед инференсом.
-    # Больший батч = лучше нагружен GPU, чуть выше латентность при низкой
-    # нагрузке (кадр дожидается соседей до grace-окна).
-    yolo_batch_size: int = 8
-    # Верхняя граница (мс) ожидания ПЕРВОГО сообщения батча. Дальнейшая
-    # сборка динамическая: батч расширяется, только пока очередь горячая
-    # (сообщения приходят из локального кэша почти мгновенно) — при низкой
-    # нагрузке одиночный кадр обрабатывается без ожидания партнёров.
-    yolo_batch_grace_ms: int = 10
-    # Потоки для CPU/сетевой работы (imdecode, аплоад в MinIO): эта работа
-    # не занимает GPU, поэтому идёт параллельно подготовке/финишу инференса.
+    # Стримовый инференс асинхронный (Triton): кадры НЕ лепятся в батч на
+    # клиенте — каждый кадр сразу уходит отдельным async-запросом, батчи
+    # склеивает динамический батчинг Triton'а (замер: ~210 fps против
+    # ~61 fps у клиентских батчей синхронными запросами).
+    # Сколько кадров держать «в полёте» к Triton: меньше — GPU голодает
+    # в сетевых паузах, больше — латентность и RAM. Замер: 32–64 дают
+    # потолок GPU (~150–210 fps на этом стенде).
+    yolo_infer_window: int = 64
+    # Потоки для CPU/сетевой работы (imdecode, letterbox, аплоад в MinIO):
+    # эта работа не занимает GPU, поэтому идёт параллельно отправке/приёму.
     yolo_io_workers: int = 4
 
     # --- Detection consumer: пропускная способность detections → БД ---
@@ -104,18 +96,6 @@ class Settings(BaseSettings):
     # для запуска alembic/скриптов с хостовой машины. .env.local в .gitignore.
     model_config = ConfigDict(env_file=(".env", ".env.local"), extra="ignore")
 
-    @field_validator("device", mode="before")
-    @classmethod
-    def _normalize_device(cls, v):
-        v = str(v).lower()
-        if v in ("auto", "", "none"):
-            return _detect_device()
-        if v == "gpu":
-            return "cuda"
-        if v in ("cpu", "cuda") or v.isdigit():
-            return v
-        raise ValueError(f"Invalid device: {v!r}. Use auto / cpu / cuda / 0 / 1")
-
 
 settings = Settings()
-logger.info(f"[Config] device={settings.device}, bucket={settings.s3_bucket}")
+logger.info(f"[Config] triton={settings.triton_url}, bucket={settings.s3_bucket}")

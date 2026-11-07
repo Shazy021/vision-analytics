@@ -17,7 +17,12 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.topics import TOPIC_VIDEO_REQUESTS
 from app.db.models import Video, VideoDetection
-from app.processing.planner import plan_chunks, probe_media, should_chunk
+from app.processing.planner import (
+    allocate_sample_budgets,
+    plan_chunks,
+    probe_media,
+    should_chunk,
+)
 from app.schemas.video import VideoCreate, VideoRead
 
 logger = logging.getLogger(__name__)
@@ -71,7 +76,14 @@ def _plan_video_tasks(video: Video, db: Session) -> list[dict]:
         max_frames = settings.max_frames if video.max_frames is None else video.max_frames
         if max_frames > 0 and video.fps:
             step = max(1, int(video.fps / extract_fps))
-            target = min(target, max(1, max_frames // step))
+            total_budget = max(1, max_frames // step)
+            target = min(target, total_budget)
+            # Лимит означает «ПЕРВЫЕ N кадров», а не «N кадров на всё видео»:
+            # бюджет расходуется с головы (те же front-loaded бюджеты, что
+            # считает воркер по start_s), хвостовые чанки не ставятся в
+            # очередь вовсе — они ничего бы не обработали.
+            budgets = allocate_sample_budgets(chunks, total_budget, 1.0 / extract_fps)
+            chunks = [ch for ch, b in zip(chunks, budgets) if b > 0]
         video.chunks_total = len(chunks)
         video.chunks_done = 0
         video.frames_to_process = target

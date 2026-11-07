@@ -7,7 +7,7 @@
   "timezone": "utc",
   "title": "Pipeline Overview",
   "uid": "pipeline-overview",
-  "version": 2,
+  "version": 3,
   "schemaVersion": 39,
   "refresh": "10s",
   "time": { "from": "now-1h", "to": "now" },
@@ -126,6 +126,50 @@
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "targets": [
         { "refId": "A", "expr": "sum(increase(frame_task_completed_total{status=\"failed\"}[$__range]))", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Triton: кадры/с и средний батч движка",
+      "description": "nv_inference_count — картинки, прогнанные движком; request_success — входящие async-запросы; средний батч = count/exec — НАСКОЛЬКО динамический батчинг реально склеивает наши одиночные запросы в прогоны (1.0 = не склеивает).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "средний батч" },
+            "properties": [ { "id": "unit", "value": "short" }, { "id": "custom.axisPlacement", "value": "right" } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(nv_inference_count[1m]))", "legendFormat": "движок, кадров/с" },
+        { "refId": "B", "expr": "sum(rate(nv_inference_request_success[1m]))", "legendFormat": "запросов/с" },
+        { "refId": "C", "expr": "sum(rate(nv_inference_count[1m])) / sum(rate(nv_inference_exec_count[1m]))", "legendFormat": "средний батч" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Triton: GPU, очередь и время инференса",
+      "description": "nv_gpu_utilization — загружен ли движок под потолок; pending — очередь перед движком (растёт = не успеваем); инференс на кадр = прирост compute_infer / прирост запросов. Очередь+низкий GPU = узкое место НЕ движок (декод/отправка).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "очередь, запросов" },
+            "properties": [ { "id": "unit", "value": "short" }, { "id": "custom.axisPlacement", "value": "right" } ] },
+          { "matcher": { "id": "byName", "options": "инференс, мс/кадр" },
+            "properties": [ { "id": "unit", "value": "ms" }, { "id": "custom.axisPlacement", "value": "right" } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "max(nv_gpu_utilization)", "legendFormat": "GPU busy" },
+        { "refId": "B", "expr": "sum(nv_inference_pending_request_count)", "legendFormat": "очередь, запросов" },
+        { "refId": "C", "expr": "1000 * sum(rate(nv_inference_compute_infer_duration_us[1m])) / clamp_min(sum(rate(nv_inference_count[1m])), 0.001)", "legendFormat": "инференс, мс/кадр" }
       ]
     }
   ]

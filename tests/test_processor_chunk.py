@@ -1,5 +1,5 @@
 """Тесты process_video_chunk: time-grid сэмплирование, идемпотентность,
-финализация, защита от обрыва. Синтетика 6с/30fps + мок YOLODetector —
+финализация, защита от обрыва. Синтетика 6с/30fps + мок TritonDetector —
 без GPU и сети.
 """
 from unittest.mock import MagicMock, patch
@@ -76,7 +76,7 @@ class TestProcessVideoChunk:
         без пересечения. Финализация — по последнему чанку."""
         video = _make_video(db, six_second_video)
         detector, record = _mock_detector()
-        with patch.object(processor, "YOLODetector", return_value=detector):
+        with patch.object(processor, "TritonDetector", return_value=detector):
             process_video_chunk(video.id, 0.0, 3.0, db)
             process_video_chunk(video.id, 3.0, 6.0, db)
 
@@ -103,7 +103,7 @@ class TestProcessVideoChunk:
         ))
         db.commit()
         detector, _record = _mock_detector()
-        with patch.object(processor, "YOLODetector", return_value=detector):
+        with patch.object(processor, "TritonDetector", return_value=detector):
             process_video_chunk(video.id, 0.0, 3.0, db)
             process_video_chunk(video.id, 0.0, 3.0, db)  # redelivery
 
@@ -120,7 +120,7 @@ class TestProcessVideoChunk:
         monkeypatch.setattr(processor, "PROGRESS_REPORT_EVERY", 10)
         video = _make_video(db, six_second_video)
         detector, _record = _mock_detector()
-        with patch.object(processor, "YOLODetector", return_value=detector):
+        with patch.object(processor, "TritonDetector", return_value=detector):
             process_video_chunk(video.id, 0.0, 3.0, db)
         db.expire_all()
         video = db.get(Video, video.id)
@@ -128,16 +128,34 @@ class TestProcessVideoChunk:
         assert video.processed_frames == 15
 
     def test_max_frames_budget_applied_per_chunk(self, db, six_second_video, monkeypatch):
-        """max_frames=30, step=int(30/5)=6 → общий бюджет 5 сэмплов →
-        распределение [3, 2]: первый чанк останавливается на 3.
-        chunk_sec=3, чтобы план 6с-видео состоял из двух чанков."""
+        """max_frames=30, step=int(30/5)=6 → общий бюджет 5 сэмплов.
+        Лимит = «первые N кадров»: весь бюджет уходит первому чанку
+        (распределение [5, 0]), сэмплы — начало видео, а не «по чуть-чуть
+        из каждого чанка». chunk_sec=3, чтобы план 6с-видео был из двух чанков."""
         from app.core.config import settings
         monkeypatch.setattr(settings, "video_chunk_sec", 3.0)
         video = _make_video(db, six_second_video, max_frames=30)
         detector, record = _mock_detector()
-        with patch.object(processor, "YOLODetector", return_value=detector):
+        with patch.object(processor, "TritonDetector", return_value=detector):
             process_video_chunk(video.id, 0.0, 3.0, db)
-        assert len(record) == 3
+        assert len(record) == 5
+        stamps = [t for _fi, t in record]
+        assert all(s < 1.0 + 1e-6 for s in stamps)  # 0.0..0.8 — начало видео
+
+    def test_zero_budget_chunk_skipped(self, db, six_second_video, monkeypatch):
+        """Бюджет целиком ушёл первому чанку: второй (budget=0) не открывает
+        поток и не сэмплирует, но чанк закрывает (chunks_done)."""
+        from app.core.config import settings
+        monkeypatch.setattr(settings, "video_chunk_sec", 3.0)
+        video = _make_video(db, six_second_video, max_frames=30)
+        detector, record = _mock_detector()
+        with patch.object(processor, "TritonDetector", return_value=detector):
+            process_video_chunk(video.id, 3.0, 6.0, db)
+        assert record == []
+        db.expire_all()
+        video = db.get(Video, video.id)
+        assert video.processed_frames == 0
+        assert video.chunks_done == 1
 
     def test_missing_video_raises(self, db):
         with pytest.raises(ValueError, match="not found"):

@@ -28,6 +28,9 @@ desktop.ini
 *.pt
 *.pth
 *.onnx
+# TensorRT engine: привязан к GPU и версии TRT, пересобирается во внешней
+# репе yolo-trt-nms (export.py --mode triton), в git не кладём
+*.plan
 
 # Video files
 *.mp4

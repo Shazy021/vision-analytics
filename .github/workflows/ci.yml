@@ -42,12 +42,8 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # Сначала ставим CPU-сборку torch, иначе pip утянет CUDA-дистрибутив (~2.5 GB)
-      - name: Install torch (CPU)
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
       - name: Install dependencies
-        run: pip install ".[gpu,dev]"
+        run: pip install ".[triton,dev]"
 
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short

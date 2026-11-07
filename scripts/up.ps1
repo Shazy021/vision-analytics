@@ -8,9 +8,9 @@
 #   .\scripts\up.ps1 -Action logs    # follow logs
 #   .\scripts\up.ps1 -Action ps      # service status
 #
-# GPU is detected automatically via nvidia-smi:
-# NVIDIA found    -> adds docker-compose.gpu.yml (GPU reservations)
-# No NVIDIA found -> base compose only (runs on CPU)
+# GPU is required by the triton service (the platform's only inference
+# backend): its GPU reservation lives in docker-compose.yml itself, so no
+# overlay files are needed. Without an NVIDIA GPU the stack cannot detect.
 #
 # Linux / macOS / WSL2 users: use `make up` instead (same logic).
 # ============================================================
@@ -22,13 +22,11 @@ param(
 
 $files = @("-f", "docker-compose.yml")
 
+# Friendly pre-flight: triton needs a GPU, warn early instead of failing
+# inside docker with a device-reservation error.
 $gpu = & nvidia-smi -L 2>$null
-if ($LASTEXITCODE -eq 0 -and $gpu) {
-    Write-Host "NVIDIA GPU found: $gpu" -ForegroundColor Green
-    $files += @("-f", "docker-compose.gpu.yml")
-}
-else {
-    Write-Host "No NVIDIA GPU detected - running on CPU" -ForegroundColor Yellow
+if (-not ($LASTEXITCODE -eq 0 -and $gpu)) {
+    Write-Host "No NVIDIA GPU detected - triton (inference) will not start" -ForegroundColor Yellow
 }
 
 switch ($Action) {

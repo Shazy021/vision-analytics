@@ -24,9 +24,14 @@ from app.core.metrics import (
     frame_chunk_write_duration_seconds,
 )
 from app.db.models import Video, VideoDetection
-from app.processing.detector import YOLODetector
 from app.processing.extractor import VideoCapture
-from app.processing.planner import allocate_sample_budgets, chunk_slot, plan_chunks
+from app.processing.planner import (
+    EPS_S,
+    allocate_sample_budgets,
+    chunk_slot,
+    plan_chunks,
+)
+from app.processing.triton_detector import TritonDetector
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +39,6 @@ logger = logging.getLogger(__name__)
 # докачивает, кадры до границы выбрасываются как preroll. 2с покрывает
 # GOP наших исходников (~1с); на камерах с большим GOP увеличить.
 SEEK_MARGIN_MS = 2000.0
-_EPS_S = 1e-6
 # Сколько попыток декода чанка при преждевременном обрыве потока
 # (сеть/повреждение). Постоянная поломка (битый файл) не лечится
 # ретраями — после последней попытки задача умирает как терминальная.
@@ -43,22 +47,22 @@ CHUNK_ATTEMPTS = 3
 # живой прогресс, а не «0» до конца чанка (чанк — минуты работы).
 PROGRESS_REPORT_EVERY = 50
 
-# Модель YOLO — одна на процесс консьюмера. Загрузка весов в VRAM стоит
-# 15-20с, а задач (чанков) за жизнь процесса проходят десятки — платить
-# за каждую бессмысленно: модель stateless между детекциями. Лениво:
-# импорт модуля не должен греть CUDA/VRAM (processor импортируют тесты
-# и API, где инференса нет). Конструктор вызывается по имени модуля,
-# поэтому patch.object(processor, "YOLODetector") в тестах работает и
-# через кэш; изоляция тестов — фикстура сброса в conftest.
-# Лока нет: консьюмер однопоточный (poll-цикл), поток /metrics модель
+# Детектор — одна на процесс консьюмера. Инференс живёт в Triton-сервере,
+# но и лёгкий gRPC-клиент с проверкой готовности модели создаётся не
+# бесплатно, а задач (чанков) за жизнь процесса проходят десятки. Лениво:
+# импорт модуля не должен дёргать сеть (processor импортируют тесты и API,
+# где инференса нет). Конструктор вызывается по имени модуля, поэтому
+# patch.object(processor, "TritonDetector") в тестах работает и через кэш;
+# изоляция тестов — фикстура сброса в conftest.
+# Лока нет: консьюмер однопоточный (poll-цикл), поток /metrics детектор
 # не трогает.
-_detector_singleton: "YOLODetector | None" = None
+_detector_singleton: "TritonDetector | None" = None
 
 
-def _get_detector() -> YOLODetector:
+def _get_detector() -> TritonDetector:
     global _detector_singleton
     if _detector_singleton is None:
-        _detector_singleton = YOLODetector()
+        _detector_singleton = TritonDetector()
     return _detector_singleton
 
 
@@ -225,7 +229,7 @@ def process_video(video_id: int, db: Session) -> None:
 
 
 def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
-                  budget: int, detector: YOLODetector,
+                  budget: int, detector: TritonDetector,
                   on_sample=None, timings: dict | None = None) -> tuple[list, int, bool]:
     """Декод одного чанка [start_s, end_s) с time-grid сэмплированием.
 
@@ -252,8 +256,8 @@ def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
         # Владение: чанк отвечает за отметки next_mark..last_mark сетки
         # k/extract_fps, лежащие в [start_s, end_s). Сэмпл отметки —
         # первый декодированный кадр с t >= отметки (иммунитет к VFR).
-        next_mark = max(0, math.ceil(start_s / interval - _EPS_S))
-        last_mark = int(math.floor((end_s - _EPS_S) / interval))
+        next_mark = max(0, math.ceil(start_s / interval - EPS_S))
+        last_mark = int(math.floor((end_s - EPS_S) / interval))
 
         last_t = None
         while True:
@@ -267,11 +271,11 @@ def _decode_chunk(source: str, start_s: float, end_s: float, interval: float,
                 break
             t_s = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             last_t = t_s
-            if t_s + _EPS_S < start_s:
+            if t_s + EPS_S < start_s:
                 continue  # preroll: seek сел на keyframe до границы
-            if t_s + _EPS_S >= end_s:
+            if t_s + EPS_S >= end_s:
                 break
-            while next_mark <= last_mark and next_mark * interval <= t_s + _EPS_S:
+            while next_mark <= last_mark and next_mark * interval <= t_s + EPS_S:
                 frame_index = int(round(t_s * fps)) if fps > 0 else 0
                 started = time.perf_counter()
                 detections.extend(
@@ -325,65 +329,81 @@ def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session
 
     # Глобальный бюджет max_frames распределяем по чанкам сами: план
     # детерминирован (duration + chunk_sec), свой слот находится по start_s.
-    budget = 0
-    if video.duration and (video.max_frames if video.max_frames is not None
-                           else settings.max_frames) > 0:
+    # Бюджет расходуется С НАЧАЛА видео (первые N кадров), поэтому у ранних
+    # чанков он полный, у хвостовых — ноль. Различаем два разных нуля:
+    #   None — лимита нет вообще (max_frames=0), декодим весь диапазон;
+    #   0    — бюджет уже исчерпан предыдущими чанками, диапазон не трогаем.
+    max_frames = video.max_frames if video.max_frames is not None else settings.max_frames
+    budget: int | None = None
+    if video.duration and max_frames > 0:
         fps_meta = video.fps or 0
         step = max(1, int(fps_meta / extract_fps)) if fps_meta > 0 else 1
-        total_budget = max(1, ((video.max_frames if video.max_frames is not None
-                                else settings.max_frames)) // step)
+        total_budget = max(1, max_frames // step)
         chunks = plan_chunks(video.duration, settings.video_chunk_sec)
         slot = chunk_slot(chunks, start_s)
         if slot >= 0:
-            budget = allocate_sample_budgets(len(chunks), total_budget)[slot]
+            budget = allocate_sample_budgets(chunks, total_budget, interval)[slot]
 
-    detector = _get_detector()
-    last_err: Exception | None = None
-    # Прогресс внутри чанка: каждые PROGRESS_REPORT_EVERY сэмплов —
-    # атомарный инкремент. При ретрае частично зарепортанное откатывается,
-    # повтор пересчитает эти сэмплы заново (итог остаётся точным).
+    # Сколько сэмплов уже зарепортано в processed_frames (счётчик замыкания
+    # _report); нужен и на пути пропуска — итоговая дельта = sampled-reported.
     reported = 0
-
-    def _report(sampled_so_far: int) -> None:
-        nonlocal reported
-        if sampled_so_far - reported >= PROGRESS_REPORT_EVERY:
-            delta = sampled_so_far - reported
-            db.execute(
-                update(Video)
-                .where(Video.id == video_id)
-                .values(processed_frames=func.coalesce(Video.processed_frames, 0) + delta)
-            )
-            db.commit()
-            reported = sampled_so_far
-
     timings: dict = {}
-    for attempt in range(1, CHUNK_ATTEMPTS + 1):
-        reported = 0
-        try:
-            detections, sampled, _hit = _decode_chunk(
-                video_source, start_s, end_s, interval, budget, detector,
-                on_sample=_report, timings=timings,
-            )
-            last_err = None
-            break
-        except Exception as exc:
-            if reported:
+    if budget == 0:
+        # Диспетчер такие чанки вообще не ставит; сюда доходит только
+        # redelivery или устаревшее сообщение. Поток не открываем,
+        # сэмплов нет — но чанк нужно закрыть (chunks_done), ниже по общему
+        # пути: идемпотентная зачистка диапазона + инкременты + финализация.
+        logger.info(
+            "Video %s chunk [%.1f,%.1f) skipped: max_frames budget exhausted",
+            video_id, start_s, end_s,
+        )
+        detections, sampled = [], 0
+    else:
+        detector = _get_detector()
+        last_err: Exception | None = None
+        # Прогресс внутри чанка: каждые PROGRESS_REPORT_EVERY сэмплов —
+        # атомарный инкремент. При ретрае частично зарепортанное откатывается,
+        # повтор пересчитает эти сэмплы заново (итог остаётся точным).
+
+        def _report(sampled_so_far: int) -> None:
+            nonlocal reported
+            if sampled_so_far - reported >= PROGRESS_REPORT_EVERY:
+                delta = sampled_so_far - reported
                 db.execute(
                     update(Video)
                     .where(Video.id == video_id)
-                    .values(processed_frames=func.coalesce(Video.processed_frames, 0) - reported)
+                    .values(processed_frames=func.coalesce(Video.processed_frames, 0) + delta)
                 )
                 db.commit()
-            last_err = exc
-            logger.warning(
-                "Video %s chunk [%.1f,%.1f) attempt %d/%d failed: %s",
-                video_id, start_s, end_s, attempt, CHUNK_ATTEMPTS, exc,
-            )
-    if last_err is not None:
-        raise last_err
+                reported = sampled_so_far
 
-    frame_chunk_decode_duration_seconds.observe(timings.get("decode_s", 0.0))
-    frame_chunk_inference_duration_seconds.observe(timings.get("inference_s", 0.0))
+        for attempt in range(1, CHUNK_ATTEMPTS + 1):
+            reported = 0
+            try:
+                detections, sampled, _hit = _decode_chunk(
+                    video_source, start_s, end_s, interval, budget or 0, detector,
+                    on_sample=_report, timings=timings,
+                )
+                last_err = None
+                break
+            except Exception as exc:
+                if reported:
+                    db.execute(
+                        update(Video)
+                        .where(Video.id == video_id)
+                        .values(processed_frames=func.coalesce(Video.processed_frames, 0) - reported)
+                    )
+                    db.commit()
+                last_err = exc
+                logger.warning(
+                    "Video %s chunk [%.1f,%.1f) attempt %d/%d failed: %s",
+                    video_id, start_s, end_s, attempt, CHUNK_ATTEMPTS, exc,
+                )
+        if last_err is not None:
+            raise last_err
+
+        frame_chunk_decode_duration_seconds.observe(timings.get("decode_s", 0.0))
+        frame_chunk_inference_duration_seconds.observe(timings.get("inference_s", 0.0))
 
     # Идемпотентность: стираем собственный диапазон (redelivery-безопасно)
     write_started = time.perf_counter()
@@ -426,7 +446,6 @@ def process_video_chunk(video_id: int, start_s: float, end_s: float, db: Session
     video = db.get(Video, video_id)
     if (video.chunks_total and video.chunks_done is not None
             and video.chunks_done >= video.chunks_total and video.status == "processing"):
-        max_frames = video.max_frames if video.max_frames is not None else settings.max_frames
         video.status = "partial" if max_frames > 0 else "completed"
         db.commit()
         logger.info(

@@ -2,7 +2,7 @@
 # Prometheus — сбор метрик пайплайна видеоналитики.
 #
 # Модель: pull. Каждый сервис отдаёт plain HTTP /metrics, Prometheus
-# приходит сам каждые 15 секунд и складывает значения в свой TSDB
+# приходит сам каждые 10 секунд и складывает значения в свой TSDB
 # (retention 7d задаётся флагом в docker-compose.yml).
 #
 # Таргеты — docker-DNS имена сервисов из compose; порты консьюмеров —
@@ -13,8 +13,8 @@
 # /metrics на порт самого приложения, отдельный порт api не поднимает.
 # ============================================================
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 10s
+  evaluation_interval: 10s
 
 scrape_configs:
   - job_name: api
@@ -28,7 +28,7 @@ scrape_configs:
       - names: ["yolo-consumer"]
         type: "A"
         port: 9091
-        refresh_interval: 15s
+        refresh_interval: 10s
 
   - job_name: detection-consumer
     static_configs:
@@ -47,7 +47,23 @@ scrape_configs:
       - names: ["video-consumer"]
         type: "A"
         port: 9093
-        refresh_interval: 15s
+        refresh_interval: 10s
+
+  # Triton сам отдаёт Prometheus-метрики на :8002/metrics (по умолчанию
+  # включено, порт 8002). Что полезно:
+  #   nv_inference_count / nv_inference_exec_count — средний батч, которым
+  #     движок реально крутит прогоны (динамический батчинг: склеивает ли
+  #     наши одиночные async-запросы);
+  #   nv_inference_request_duration_us / nv_inference_queue_duration_us /
+  #     nv_inference_compute_infer_duration_us — очередь vs инференс;
+  #   nv_inference_pending_request_count — размер очереди движка;
+  #   nv_gpu_utilization (0..1), nv_gpu_memory_used_bytes — загрузка GPU.
+  # Triton — обязательная часть стека (единственный инференс), описан прямо в
+  # docker-compose.yml. Если он не поднялся (нет GPU или engine'а) — таргет
+  # DOWN, и это честная картина, а не поломка скрейпинга.
+  - job_name: triton
+    static_configs:
+      - targets: ["triton:8002"]
 
   - job_name: kafka-exporter
     static_configs:

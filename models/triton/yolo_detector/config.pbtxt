@@ -1,0 +1,43 @@
+name: "yolo_detector"
+platform: "tensorrt_plan"
+max_batch_size: 16
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_UINT8
+    dims: [ 3, 640, 640 ]
+  }
+]
+output [
+  {
+    name: "num_detections"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "boxes"
+    data_type: TYPE_FP32
+    dims: [ 300, 4 ]
+  },
+  {
+    name: "scores"
+    data_type: TYPE_FP32
+    dims: [ 300 ]
+  },
+  {
+    name: "classes"
+    data_type: TYPE_INT32
+    dims: [ 300 ]
+  }
+]
+dynamic_batching {
+  preferred_batch_size: [ 8 ]
+  max_queue_delay_microseconds: 10000
+}
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+  }
+]

@@ -2,18 +2,16 @@
 # Единый источник зависимостей проекта (PEP 621).
 #
 # Кто что устанавливает:
-#   CPU-образ (api, dashboard, detection-consumer, stream-manager):
-#       pip install ".[dash]"
-#   CUDA-образ (video-consumer, yolo-consumer):
-#       pip install ".[gpu]"          (torch ставится ОТДЕЛЬНО с индекса
-#                                      download.pytorch.org/whl/cuXXX —
-#                                      индекс не зашивается в PEP 508)
-#   CI:  torch-cpu + pip install ".[gpu,dev]"
-#   Локалка: pip install -e ".[gpu,dash,dev]"
+#   Образ (все сервисы, включая консьюмеров):
+#       pip install ".[dash,triton]"  (инференс живёт в Triton-сервере,
+#                                      консьюмерам нужен только gRPC-клиент)
+#   CI:  pip install ".[triton,dev]"
+#   Локалка: pip install -e ".[dash,triton,dev]"
 #
 # Extras:
-#   gpu   — инференс (ultralytics; torch уже установлен из индекса)
-#   dash  — дашборд (streamlit/plotly/matplotlib/Pillow)
+#   triton — клиент Triton Inference Server (numpy+grpcio, БЕЗ torch):
+#            модель (TensorRT engine) живёт в отдельном Triton-сервере
+#   dash   — дашборд (streamlit/plotly/matplotlib/Pillow)
 #   bench — внешний автобенчмарк (хост-сторона, в образы НЕ попадает)
 #   dev   — тесты и инструменты разработки (в образы НЕ попадают)
 #
@@ -59,12 +57,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Инференс: ultralytics тянет torch как зависимость — в CUDA-образе и CI
-# torch уже установлен с нужного индекса (cuXXX/cpu), pip его не тронет.
-gpu = [
-    "ultralytics==8.4.115",
+# Единственный бэкенд инференса: лёгкий gRPC-клиент Triton (numpy+grpcio),
+# БЕЗ torch. Модель (TensorRT engine с вшитым NMS) держит отдельный
+# Triton-сервер — см. docker-compose.yml, сервис triton.
+# 2.66.0, НЕ 2.67+: с 2.67 клиент требует protobuf>=6.30, что конфликтует
+# со streamlit 1.38 (protobuf<6) в нашем едином образе. Версия клиента не
+# обязана совпадать с тегом сервера: gRPC protocol v2 стабилен, а вот тег
+# сервера обязан подходить к engine'у (это другое ограничение).
+triton = [
+    "tritonclient[grpc]==2.66.0",
 ]
-# Дашборд: streamlit + отрисовка боксов поверх кадров в превью
+# Дашборд: streamlit + отрисовка боксов поверх кадров в превью.
+# streamlit закреплён на 1.38: с 1.49 он требует protobuf>=6-совместимых
+# зависимостей и иначе как через protobuf 6 не ставится, а protobuf 6
+# конфликтует с tritonclient (см. extra triton). Кроме того, в 1.49-1.6x
+# был класс багов «keyed-элементы внутри @st.fragment перемонтируются на
+# каждый run_every» — дашборд на живых фрагментах начинает маргать.
 dash = [
     "streamlit==1.38.0",
     "plotly==5.24.0",

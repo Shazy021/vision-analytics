@@ -159,7 +159,7 @@ def test_upload_publishes_task_to_kafka(client):
 
 
 def test_upload_long_video_publishes_chunk_tasks(client):
-    """Длинное видео (проба: 300с) → пакет чанковых сообщений и
+    """Длинное видео (проба: 300с, лимит снят) → пакет чанковых сообщений и
     счётчики в БД; короткое (тест выше) — одна классическая задача."""
     with patch("app.core.storage.upload_file"), \
          patch("app.api.routes.videos.probe_media", return_value=(300.0, 30.0)), \
@@ -169,6 +169,7 @@ def test_upload_long_video_publishes_chunk_tasks(client):
         response = client.post(
             "/api/videos/upload",
             files={"file": ("long.mp4", b"0" * 100, "video/mp4")},
+            data={"max_frames": 0},
         )
 
     assert response.status_code == 201
@@ -188,6 +189,34 @@ def test_upload_long_video_publishes_chunk_tasks(client):
     assert video.chunks_done == 0
     assert video.duration == 300.0
     assert video.fps == 30
+    db.close()
+
+
+def test_upload_with_max_frames_publishes_only_head_chunks(client):
+    """Лимит max_frames = «первые N кадров»: в очередь уходят только ранние
+    чанки, пока не исчерпан бюджет (50 сэмплов = первый 30-секундный чанк
+    при fps=30, extract_fps=5, step=6), а не весь хвост видео."""
+    with patch("app.core.storage.upload_file"), \
+         patch("app.api.routes.videos.probe_media", return_value=(300.0, 30.0)), \
+         patch("app.api.routes.videos._get_kafka_producer") as mock_get_producer:
+        producer = MagicMock()
+        mock_get_producer.return_value = producer
+        response = client.post(
+            "/api/videos/upload",
+            files={"file": ("long.mp4", b"0" * 100, "video/mp4")},
+            data={"max_frames": 300},
+        )
+
+    assert response.status_code == 201
+    assert producer.produce.call_count == 1
+    task = json.loads(producer.produce.call_args[1]["value"])
+    task.pop("enqueued_at")
+    assert task == {"video_id": 1, "start_s": 0.0, "end_s": 30.0}
+
+    db = _db_session()
+    video = db.get(Video, 1)
+    assert video.chunks_total == 1
+    assert video.frames_to_process == 50  # 300 // step(6)
     db.close()
 
 

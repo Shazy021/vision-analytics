@@ -5,6 +5,7 @@ import pytest
 
 from app.processing.planner import (
     allocate_sample_budgets,
+    chunk_mark_capacity,
     chunk_slot,
     plan_chunks,
     probe_media,
@@ -49,19 +50,43 @@ class TestShouldChunk:
         assert should_chunk(600.0, 120.0) is True
 
 
+class TestChunkMarkCapacity:
+    def test_marks_in_range(self):
+        # [0,3) при сетке 0.2с: отметки 0.0..2.8 → 15; [3,6) — ещё 15
+        assert chunk_mark_capacity(0.0, 3.0, 0.2) == 15
+        assert chunk_mark_capacity(3.0, 6.0, 0.2) == 15
+
+    def test_tail_not_multiple(self):
+        # [0,0.5): отметки 0.0, 0.2, 0.4 → 3
+        assert chunk_mark_capacity(0.0, 0.5, 0.2) == 3
+
+    def test_bad_input(self):
+        assert chunk_mark_capacity(0.0, 3.0, 0) == 0
+        assert chunk_mark_capacity(3.0, 3.0, 0.2) == 0
+
+
 class TestAllocateSampleBudgets:
-    def test_even_split(self):
-        assert allocate_sample_budgets(4, 100) == [25, 25, 25, 25]
+    """Лимит = «первые N кадров»: бюджет расходуется с головы видео."""
 
-    def test_remainder_to_front(self):
-        assert allocate_sample_budgets(3, 10) == [4, 3, 3]
+    def test_front_loads_first_chunk(self):
+        chunks = plan_chunks(100.0, 30.0)  # ёмкости [150, 150, 150, 50]
+        assert allocate_sample_budgets(chunks, 100, 0.2) == [100, 0, 0, 0]
 
-    def test_smaller_than_chunks_round_robin(self):
-        assert allocate_sample_budgets(4, 3) == [1, 1, 1, 0]
+    def test_budget_spans_into_next_chunk(self):
+        chunks = plan_chunks(100.0, 30.0)
+        assert allocate_sample_budgets(chunks, 200, 0.2) == [150, 50, 0, 0]
+
+    def test_budget_covers_all_chunks(self):
+        chunks = plan_chunks(60.0, 30.0)
+        assert allocate_sample_budgets(chunks, 1000, 0.2) == [150, 150]
+
+    def test_budget_smaller_than_first_chunk(self):
+        chunks = plan_chunks(60.0, 30.0)
+        assert allocate_sample_budgets(chunks, 3, 0.2) == [3, 0]
 
     def test_disabled(self):
-        assert allocate_sample_budgets(4, 0) == []
-        assert allocate_sample_budgets(0, 10) == []
+        assert allocate_sample_budgets([(0.0, 30.0)], 0, 0.2) == []
+        assert allocate_sample_budgets([], 10, 0.2) == []
 
 
 class TestChunkSlot:
