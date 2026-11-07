@@ -68,7 +68,7 @@ app.processing.processor
 - Владение кадрами — по ВРЕМЕННОЙ сетке: чанк отвечает за отметки
   k/extract_fps в своём диапазоне; сэмпл отметки — первый декодированный
   кадр с t >= отметки (иммунитет к VFR; индексная сетка на VFR ломается)
-- YOLO детекция каждого N-го кадра (управляется settings.extract_fps)
+- Детекция каждого N-го кадра через Triton (управляется settings.extract_fps)
     |
 - Создаются записи Detection в БД:
   frame_index, timestamp, class_name, bbox, confidence
@@ -106,7 +106,7 @@ RTSP URL -> app.streams.producer.FrameProducer (subprocess, запускаетс
   - Публикация в Kafka топик "raw_frames"
         |
         +--> app.consumers.yolo_frames.YOLOConsumer
-        |      - Декодирует кадр, выполняет YOLO инференс
+        |      - Декодирует кадр, отправляет в Triton (async)
         |      - Сохраняет кадры С детекциями в MinIO: streams/{stream_id}/{index}.jpg
         |      - Публикует детекции в Kafka топик "detections"
         |
@@ -308,7 +308,7 @@ desired-state + reconciler: намерением владеет API, наблю�
 app/
 ├── main.py                     # FastAPI приложение, lifespan, регистрация роутеров
 ├── core/                       # общее ядро
-│   ├── config.py               # pydantic-settings: БД, Kafka, S3, YOLO
+│   ├── config.py               # pydantic-settings: БД, Kafka, S3, Triton
 │   ├── cuda.py                 # классификация липких CUDA-ошибок (консьюмеры)
 │   ├── database.py             # SQLAlchemy engine, SessionLocal, Base, get_db
 │   ├── storage.py              # MinIO клиент: upload, download, presigned, TTL
@@ -325,33 +325,31 @@ app/
 │   ├── video.py                # VideoBase, VideoCreate, VideoRead (Pydantic v2)
 │   └── detection.py            # DetectionBase, DetectionRead
 ├── processing/                 # домен обработки видео (используется consumers/video)
-│   ├── processor.py            # process_video(): чтение из MinIO -> YOLO -> БД
-│   ├── detector.py             # YOLODetector обёртка (Ultralytics YOLOv8)
+│   ├── processor.py            # process_video(): чтение из MinIO -> Triton -> БД
+│   ├── triton_detector.py      # TritonDetector: gRPC-клиент Triton (TensorRT engine)
 │   └── extractor.py            # VideoCapture context manager, Frame dataclass
 ├── streams/                    # compose-сервис: stream-manager
 │   ├── manager.py              # reconciler: desired-state цикл над producer'ами
 │   └── producer.py             # FrameProducer: RTSP/файл -> Kafka raw_frames
 └── consumers/                  # Kafka-консьюмеры (модуль = контейнер)
     ├── video.py                # VideoConsumer: video_requests -> process_video -> БД
-    ├── yolo_frames.py          # raw_frames -> YOLO -> detections + MinIO
+    ├── yolo_frames.py          # raw_frames -> Triton -> detections + MinIO
     └── detections.py           # DetectionConsumer: detections -> PostgreSQL
 
 alembic/                        # Миграции БД (alembic upgrade head)
-tests/                          # pytest: API, YOLO, extractor, streams, консьюмеры
+tests/                          # pytest: API, TritonDetector, extractor, streams, консьюмеры
 dashboard/                      # Streamlit приложение
 monitoring/                     # observability как код
 ├── prometheus/prometheus.yml   #   таргеты; video-consumer — dns_sd per-replica
 └── grafana/provisioning/       #   datasource + дашборды JSON (правка = коммит)
 .github/workflows/              # CI (lint + test), Docker build
-docker-compose.yml              # Все сервисы (режим CPU)
-docker-compose.gpu.yml          # GPU overrides (NVIDIA)
-Dockerfile                      # CUDA образ (video-consumer, yolo-consumer)
-Dockerfile.cpu                  # CPU образ (api, detection-consumer, stream-manager, dashboard)
+docker-compose.yml              # Все сервисы, включая triton (GPU-резерв у него)
+Dockerfile.cpu                  # Единый образ (api, консьюмеры, dashboard; без torch)
 Makefile                        # make up / make down / make test / make lint
 pyproject.toml                  # Конфигурация pytest, ruff, alembic
-pyproject.toml                  # Зависимости (PEP 621): база + extras gpu/dash/dev;
-                                #   CPU-образ: ".[dash]", CUDA-образ: ".[gpu]",
-                                #   CI: ".[gpu,dev]", локалка: -e ".[gpu,dash,dev]"
+pyproject.toml                  # Зависимости (PEP 621): база + extras triton/dash/dev;
+                                #   образ: ".[dash,triton]", CI: ".[triton,dev]",
+                                #   локалка: -e ".[dash,triton,dev]"
 ```
 
 ---
@@ -373,7 +371,7 @@ FastAPI: создать запись Video -> загрузить файл в Min
 VideoConsumer (x replicas): process_video() / process_video_chunk()
     |  читает видео из MinIO по HTTP (presigned URL)
     |  чанки одного видео жуются репликами ПАРАЛЛЕЛЬНО (time-grid владение)
-    |  YOLO детекция каждого N-го кадра
+    |  Детекция каждого N-го кадра (Triton)
     |  запись строк Detection в PostgreSQL
     |  атомарные инкременты прогресса, финализация по chunks_done
     v
@@ -390,7 +388,7 @@ VideoConsumer (x replicas): process_video() / process_video_chunk()
 FrameProducer: читает RTSP -> кодирует JPEG -> публикует в Kafka "raw_frames"
     |
     v
-YOLOConsumer: потребляет "raw_frames" -> YOLO -> публикует "detections"
+YOLOConsumer: потребляет "raw_frames" -> Triton -> публикует "detections"
     |                                  -> сохраняет кадр в MinIO (если есть детекции)
     v
 DetectionConsumer: потребляет "detections" -> записывает строки Detection в PostgreSQL
@@ -410,7 +408,7 @@ DetectionConsumer: потребляет "detections" -> записывает с�
 | Миграции | Alembic |
 | Объектное хранилище | MinIO (S3-совместимое) |
 | Очереди | Kafka (режим KRaft, без ZooKeeper) — события и задачи обработки видео |
-| ML | Ultralytics YOLOv8 |
+| ML | YOLOv8 на Triton Inference Server (TensorRT engine, NMS в графе) |
 | Медиа | OpenCV + FFmpeg |
 | Дашборд | Streamlit + Plotly |
 | Мониторинг | Prometheus + Grafana + kafka-exporter |
@@ -421,12 +419,12 @@ DetectionConsumer: потребляет "detections" -> записывает с�
 
 ## Docker архитектура
 
-Два образа для минимизации потребления GPU-памяти:
+Один образ: torch в проекте не используется вовсе, инференс вынесен в
+Triton Inference Server (TensorRT engine, единственный бэкенд детекции).
 
 | Образ | Dockerfile | Сервисы | Содержимое |
 |-------|-----------|---------|-----------|
-| `vap-cpu` | `Dockerfile.cpu` | api, detection-consumer, stream-manager, dashboard | Без torch (~2 ГБ) |
-| `vap-cuda` | `Dockerfile` | video-consumer, yolo-consumer | torch + CUDA (~10-11 ГБ) |
+| `vap-cpu` | `Dockerfile.cpu` | api, video-consumer, yolo-consumer, detection-consumer, stream-manager, dashboard | Без torch (~2 ГБ) |
 
 Сервисы в `docker-compose.yml`:
 
@@ -437,8 +435,9 @@ DetectionConsumer: потребляет "detections" -> записывает с�
 | `dashboard` | vap-cpu | 8501 | Streamlit дашборд |
 | `kafka` | cp-kafka:7.6.0 | 9092 | Kafka брокер (KRaft) |
 | `kafka-init` | cp-kafka:7.6.0 | — | Одноразовый: создание топиков |
-| `video-consumer` | vap-cuda | — | video_requests -> process_video -> БД (replicas: 2) |
-| `yolo-consumer` | vap-cuda | — | Kafka -> YOLO -> детекции |
+| `triton` | nvcr.io/nvidia/tritonserver | 8001 (gRPC), 8002 (метрики) | Инференс YOLOv8 (TensorRT), GPU-резерв |
+| `video-consumer` | vap-cpu | — | video_requests -> process_video -> БД (replicas: 2) |
+| `yolo-consumer` | vap-cpu | — | Kafka -> Triton -> детекции |
 | `detection-consumer` | vap-cpu | — | Kafka -> PostgreSQL |
 | `stream-manager` | vap-cpu | — | Reconciler: владеет процессами producer'ов |
 | `mediamtx` | bluenviron/mediamtx | 8554 | RTSP сервер (симуляция камеры) |
@@ -447,11 +446,14 @@ DetectionConsumer: потребляет "detections" -> записывает с�
 | `kafka-exporter` | danielqsj/kafka-exporter | 9308 | Лаги консьюмер-групп и размеры топиков |
 | `grafana` | grafana/grafana | 3000 | Дашборды (provisioning из monitoring/) |
 
-GPU: используй override-файл `docker-compose.gpu.yml` или `make up`
-(автоопределение через `nvidia-smi`).
+GPU нужен одному сервису — `triton`: его резервирование описано прямо в
+базовом `docker-compose.yml` (override-файлы больше не нужны). Engine
+(`models/triton/yolo_detector/1/model.plan`) собирается во внешней репе
+`yolo-trt-nms` и в git не попадает — тег образа Triton обязан совпадать с
+версией TensorRT, под которую собран engine.
 
-CUDA-контекст не переживает `fork()`, поэтому каждый контейнер консьюмера
-выполняет инференс в главном процессе; параллелизм через `deploy.replicas: 2`
+Консьюмеры GPU-контекст не создают вовсе (инференс по gRPC), поэтому
+`fork()`-проблематика ушла; параллелизм — `deploy.replicas: 2`
 (независимые контейнеры, Kafka раздаёт партиции `video_requests` между ними).
 
 ---
@@ -531,14 +533,15 @@ Video Track (полная трасса + «накладные расходы» �
 - Синхронизация правого («ведомого») плеера — drift-коррекция раз в 0.5 с
 
 ### Примечания по производительности
-- Модель YOLO грузится **один раз на процесс** консьюмера (ленивый кэш в
-  `processor._get_detector()`): загрузка весов в VRAM стоит 15-20с, а задач
-  (чанков) за жизнь процесса проходят десятки. Замеры по логам: первый чанк
-  на реплике 45.4с против 27-28с у последующих равных (900 сэмплов, ~5к
-  детекций); короткое видео 23.6с → 2.3с.
-- GPU обрабатывает батчи эффективнее, чем одиночные кадры: yolo-consumer
-  собирает динамический батч со всех назначенных партиций и делает один
-  `detect_batch()` на весь сбор (кросс-стримовый батч)
+- gRPC-клиент Triton создаётся **один на процесс** консьюмера (ленивый кэш в
+  `processor._get_detector()`): конструктор проверяет готовность модели и
+  поднимает каналы; задач (чанков) за жизнь процесса проходят десятки.
+  Сама модель в VRAM живёт на стороне Triton-сервера — консьюмеру она
+  не нужна вовсе.
+- Стримовый инференс — поток одиночных async-запросов: клиентские батчи
+  синхронными запросами дали ~61 fps против ~156-210 fps у async-потока,
+  потому что динамический батчинг склеивает прогоны движка сам
+  (подробности и замеры — в докстринге `app/consumers/yolo_frames.py`)
 - Kafka `message.max.bytes`: 5 МБ (JPEG кадры в бинарном конверте)
 - Kafka retention: `raw_frames` = 1 час, `detections` = 24 часа, `video_requests` = 24 часа
 - MinIO upload: `fput_object` (multipart) для видео, `put_object` для кадров
@@ -572,7 +575,7 @@ curl "http://localhost:8000/api/analytics/class-distribution?video_id=1"
 ## Чеклист при запуске
 
 1. `cp .env.example .env` — задать учётные данные при необходимости
-2. `docker compose up -d` (или `make up` для автоопределения GPU)
+2. `docker compose up -d` (или `make up`; нужен NVIDIA GPU — сервис `triton`)
 3. `alembic upgrade head` — выполнить миграции (или положиться на `init_db()` при старте)
 4. Проверить работоспособность: `curl http://localhost:8000/health`
 5. Открыть дашборд: http://localhost:8501
@@ -593,7 +596,7 @@ curl "http://localhost:8000/api/analytics/class-distribution?video_id=1"
 |--------|------|
 | Точка входа приложения | `app/main.py` |
 | Консьюмер задач видео | `app/consumers/video.py` |
-| YOLO детекция | `app/processing/detector.py` |
+| Детекция (Triton-клиент) | `app/processing/triton_detector.py` |
 | Пайплайн видео | `app/processing/processor.py` |
 | Хранилище MinIO | `app/core/storage.py` |
 | Модели БД | `app/db/models.py` |

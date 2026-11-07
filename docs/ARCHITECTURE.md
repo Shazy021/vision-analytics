@@ -68,7 +68,7 @@ app.processing.processor
 - Frame ownership follows a TIME grid: a chunk owns the marks
   k/extract_fps inside its range; a mark's sample is the first decoded
   frame with t >= mark (VFR-immune; an index grid breaks on VFR)
-- YOLO detection every Nth frame (controlled by settings.extract_fps)
+- YOLO detection every Nth frame via Triton (controlled by settings.extract_fps)
     |
 - Creates Detection rows in DB:
   frame_index, timestamp, class_name, bbox, confidence
@@ -106,7 +106,7 @@ Every Nth frame:
   - Publish to Kafka topic "raw_frames"
         |
         +--> app.consumers.yolo_frames.YOLOConsumer
-        |      - Decode frame, run YOLO inference
+        |      - Decode frame, send to Triton (async)
         |      - Save frames WITH detections to MinIO: streams/{stream_id}/{index}.jpg
         |      - Publish detections to Kafka topic "detections"
         |
@@ -311,7 +311,7 @@ shared code lives in `core/`, `db/`, `schemas/`.
 app/
 ├── main.py                     # FastAPI app, lifespan, router registration
 ├── core/                       # shared kernel
-│   ├── config.py               # pydantic-settings: DB, Kafka, S3, YOLO
+│   ├── config.py               # pydantic-settings: DB, Kafka, S3, Triton
 │   ├── cuda.py                 # sticky CUDA error classification (consumers)
 │   ├── database.py             # SQLAlchemy engine, SessionLocal, Base, get_db
 │   ├── storage.py              # MinIO client: upload, download, presigned, TTL
@@ -328,33 +328,31 @@ app/
 │   ├── video.py                # VideoBase, VideoCreate, VideoRead (Pydantic v2)
 │   └── detection.py            # DetectionBase, DetectionRead
 ├── processing/                 # video processing domain (used by consumers/video)
-│   ├── processor.py            # process_video(): read MinIO -> YOLO -> DB
-│   ├── detector.py             # YOLODetector wrapper (Ultralytics YOLOv8)
+│   ├── processor.py            # process_video(): read MinIO -> Triton -> DB
+│   ├── triton_detector.py      # TritonDetector: gRPC client (TensorRT engine)
 │   └── extractor.py            # VideoCapture context manager, Frame dataclass
 ├── streams/                    # compose service: stream-manager
 │   ├── manager.py              # reconciler: desired-state loop over producers
 │   └── producer.py             # FrameProducer: RTSP/file -> Kafka raw_frames
 └── consumers/                  # Kafka consumer services (one module per container)
     ├── video.py                # VideoConsumer: video_requests -> process_video -> DB
-    ├── yolo_frames.py          # raw_frames -> YOLO -> detections + MinIO
+    ├── yolo_frames.py          # raw_frames -> Triton -> detections + MinIO
     └── detections.py           # DetectionConsumer: detections -> PostgreSQL
 
 alembic/                        # DB migrations (alembic upgrade head)
-tests/                          # pytest: API, YOLO, extractor, streams, consumers
+tests/                          # pytest: API, TritonDetector, extractor, streams, consumers
 dashboard/                      # Streamlit app
 monitoring/                     # observability as code
 ├── prometheus/prometheus.yml   #   targets; video-consumer via dns_sd per-replica
 └── grafana/provisioning/       #   datasource + dashboards as JSON (edit = commit)
 .github/workflows/              # CI (lint + test), Docker build
-docker-compose.yml              # All services (CPU mode)
-docker-compose.gpu.yml          # GPU overrides (NVIDIA)
-Dockerfile                      # CUDA image (video-consumer, yolo-consumer)
-Dockerfile.cpu                  # CPU image (api, detection-consumer, stream-manager, dashboard)
+docker-compose.yml              # All services, incl. triton (its GPU reservation lives here)
+Dockerfile.cpu                  # Single image (api, consumers, dashboard; no torch)
 Makefile                        # make up / make down / make test / make lint
 pyproject.toml                  # pytest, ruff, alembic config
-pyproject.toml                  # Deps (PEP 621): base + extras gpu/dash/dev;
-                                #   CPU image: ".[dash]", CUDA image: ".[gpu]",
-                                #   CI: ".[gpu,dev]", local: -e ".[gpu,dash,dev]"
+pyproject.toml                  # Deps (PEP 621): base + extras triton/dash/dev;
+                                #   image: ".[dash,triton]", CI: ".[triton,dev]",
+                                #   local: -e ".[dash,triton,dev]"
 ```
 
 ---
@@ -376,7 +374,7 @@ FastAPI: create Video row -> upload file to MinIO -> publish task
 VideoConsumer (x replicas): process_video() / process_video_chunk()
     |  read video from MinIO via HTTP (presigned URL)
     |  chunks of one video are chewed by replicas IN PARALLEL (time-grid ownership)
-    |  YOLO detect every Nth frame
+    |  Triton detection every Nth frame
     |  write Detection rows to PostgreSQL
     |  atomic progress increments, finalize when chunks_done == chunks_total
     v
@@ -393,7 +391,7 @@ Client polls GET /api/videos/{id}/status -> "completed"
 FrameProducer: read RTSP -> encode JPEG -> publish Kafka "raw_frames"
     |
     v
-YOLOConsumer: consume "raw_frames" -> YOLO -> publish "detections"
+YOLOConsumer: consume "raw_frames" -> Triton -> publish "detections"
     |                                  -> save frame to MinIO (if detections > 0)
     v
 DetectionConsumer: consume "detections" -> write Detection rows to PostgreSQL
@@ -413,7 +411,7 @@ Dashboard: GET /api/streams/{id}/detections + /api/analytics/stream-activity
 | Migrations | Alembic |
 | Object Storage | MinIO (S3-compatible) |
 | Message Queue / Task Queue | Kafka (KRaft mode, no ZooKeeper) — events AND video tasks |
-| ML | Ultralytics YOLOv8 |
+| ML | YOLOv8 on Triton Inference Server (TensorRT engine, NMS in graph) |
 | Media | OpenCV + FFmpeg |
 | Dashboard | Streamlit + Plotly |
 | Observability | Prometheus + Grafana + kafka-exporter |
@@ -424,12 +422,12 @@ Dashboard: GET /api/streams/{id}/detections + /api/analytics/stream-activity
 
 ## Docker Architecture
 
-Two images to minimize GPU memory usage:
+A single image: torch is gone from the project entirely, inference lives in
+Triton Inference Server (TensorRT engine, the only detection backend).
 
 | Image | Dockerfile | Services | Contents |
 |-------|-----------|----------|----------|
-| `vap-cpu` | `Dockerfile.cpu` | api, detection-consumer, stream-manager, dashboard | No torch (~2 GB) |
-| `vap-cuda` | `Dockerfile` | video-consumer, yolo-consumer | torch + CUDA (~10-11 GB) |
+| `vap-cpu` | `Dockerfile.cpu` | api, video-consumer, yolo-consumer, detection-consumer, stream-manager, dashboard | No torch (~2 GB) |
 
 Services in `docker-compose.yml`:
 
@@ -440,8 +438,9 @@ Services in `docker-compose.yml`:
 | `dashboard` | vap-cpu | 8501 | Streamlit dashboard |
 | `kafka` | cp-kafka:7.6.0 | 9092 | Kafka broker (KRaft) |
 | `kafka-init` | cp-kafka:7.6.0 | — | One-shot: create topics |
-| `video-consumer` | vap-cuda | — | video_requests -> process_video -> DB (replicas: 2) |
-| `yolo-consumer` | vap-cuda | — | Kafka -> YOLO -> detections |
+| `triton` | nvcr.io/nvidia/tritonserver | 8001 (gRPC), 8002 (metrics) | YOLOv8 inference (TensorRT), GPU reservation |
+| `video-consumer` | vap-cpu | — | video_requests -> process_video -> DB (replicas: 2) |
+| `yolo-consumer` | vap-cpu | — | Kafka -> Triton -> detections |
 | `detection-consumer` | vap-cpu | — | Kafka -> PostgreSQL |
 | `stream-manager` | vap-cpu | — | Reconciler: owns producer subprocesses |
 | `mediamtx` | bluenviron/mediamtx | 8554 | RTSP server (camera simulation) |
@@ -450,10 +449,14 @@ Services in `docker-compose.yml`:
 | `kafka-exporter` | danielqsj/kafka-exporter | 9308 | Consumer-group lag, topic sizes |
 | `grafana` | grafana/grafana | 3000 | Dashboards (provisioned from monitoring/) |
 
-GPU: use `docker-compose.gpu.yml` override or `make up` (auto-detects via `nvidia-smi`).
+GPU is needed by a single service — `triton`: its reservation is declared
+right in the base `docker-compose.yml` (no override files anymore). The
+engine (`models/triton/yolo_detector/1/model.plan`) is built in the external
+`yolo-trt-nms` repo and is not kept in git — the Triton image tag must match
+the TensorRT version the engine was built with.
 
-CUDA context does not survive `fork()`, so each consumer container runs
-inference in its main process; parallelism via `deploy.replicas: 2`
+Consumers never create a CUDA context (inference goes over gRPC), so the
+`fork()` caveat is gone; parallelism stays `deploy.replicas: 2`
 (independent containers, Kafka distributes `video_requests` partitions
 between them).
 
@@ -533,14 +536,16 @@ observations — don't trust the quantile.
 - The right ("follower") player is kept in sync via drift correction every 0.5 s
 
 ### Performance notes
-- The YOLO model loads **once per consumer process** (lazy cache in
-  `processor._get_detector()`): loading weights into VRAM costs 15-20s while
-  dozens of tasks (chunks) pass through a process lifetime. Log-measured:
-  first chunk on a replica 45.4s vs 27-28s for equal later chunks (900
-  samples, ~5k detections); a short video 23.6s -> 2.3s.
-- GPU processes batches more efficiently than single frames: yolo-consumer
-  collects a dynamic batch across all assigned partitions and runs a single
-  `detect_batch()` per collection (cross-stream batching)
+- The Triton gRPC client is created **once per consumer process** (lazy cache
+  in `processor._get_detector()`): the constructor checks model readiness and
+  opens channels, while dozens of tasks (chunks) pass through a process
+  lifetime. The model itself lives in VRAM on the Triton server side —
+  consumers never need it.
+- Stream inference is a continuous flow of single-frame async requests:
+  client-side batches with sync requests topped out at ~61 fps vs ~156-210 fps
+  for the async flow, because Triton's dynamic batching merges engine runs by
+  itself (details and measurements in the `app/consumers/yolo_frames.py`
+  module docstring)
 - Kafka `message.max.bytes`: 5 MB (JPEG frames in a binary envelope)
 - Kafka retention: `raw_frames` = 1 hour, `detections` = 24 hours, `video_requests` = 24 hours
 - MinIO upload: `fput_object` (multipart) for videos, `put_object` for frames
@@ -574,7 +579,7 @@ curl "http://localhost:8000/api/analytics/class-distribution?video_id=1"
 ## Startup Checklist
 
 1. `cp .env.example .env` — set credentials if needed
-2. `docker compose up -d` (or `make up` for GPU auto-detect)
+2. `docker compose up -d` (or `make up`; an NVIDIA GPU is required for `triton`)
 3. `alembic upgrade head` — run migrations (or rely on `init_db()` at startup)
 4. Verify health: `curl http://localhost:8000/health`
 5. Open dashboard: http://localhost:8501
@@ -594,7 +599,7 @@ machine where the dashboard is opened.
 |---------|------|
 | App entry | `app/main.py` |
 | Video task consumer | `app/consumers/video.py` |
-| YOLO detection | `app/processing/detector.py` |
+| Detection (Triton client) | `app/processing/triton_detector.py` |
 | Video pipeline | `app/processing/processor.py` |
 | MinIO storage | `app/core/storage.py` |
 | DB models | `app/db/models.py` |

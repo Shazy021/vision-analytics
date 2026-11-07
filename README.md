@@ -19,7 +19,7 @@
 <p align="center"><img src="docs/diagrams/architecture.drawio.png" alt="Архитектура платформы: API, Kafka, GPU-консьюмеры, PostgreSQL, MinIO"><br><em>Архитектура системы — подробности в <a href="docs/ARCHITECTURE.ru.md">доках</a> (<a href="docs/ARCHITECTURE.md">EN</a>).</em></p>
 
 - **API**: FastAPI, Pydantic, SQLAlchemy
-- **CV**: Ultralytics YOLOv8, OpenCV
+- **CV**: YOLOv8 на NVIDIA Triton Inference Server (TensorRT, NMS в графе), OpenCV
 - **БД**: PostgreSQL, Alembic (миграции)
 - **Дашборд**: Streamlit, Plotly
 - **Очереди/события**: Kafka (KRaft), confluent-kafka
@@ -39,7 +39,7 @@ cp .env.example .env
 docker-compose up -d
 ```
 
-Поднимутся 14 сервисов (15 контейнеров с учётом video-consumer ×2): db, minio, kafka, kafka-init (разовый — создаёт топики), api, dashboard, stream-manager, video-consumer (x2), yolo-consumer, detection-consumer, mediamtx, prometheus, grafana, kafka-exporter.
+Поднимутся 15 сервисов (17 контейнеров с учётом реплик video-consumer ×2 и yolo-consumer ×2): db, minio, kafka, kafka-init (разовый — создаёт топики), triton, api, dashboard, stream-manager, video-consumer (x2), yolo-consumer (x2), detection-consumer, mediamtx, prometheus, grafana, kafka-exporter.
 
 <p align="center"><img src="demos/docker-compose-ps.png" alt="Docker Desktop: все сервисы стека подняты"><br><em><code>kafka-init</code> в сером статусе — это норма: разовый контейнер создал топики и штатно завершился.</em></p>
 
@@ -51,28 +51,18 @@ docker-compose up -d
 > Браузер не резолвит docker-имена, поэтому ссылка должна быть по адресу
 > с проброшенным портом. Внутренние запросы контейнеров идут на `S3_ENDPOINT`.
 
-> 💻 **GPU определяется автоматически.** Скрипты старта проверяют наличие NVIDIA
-> (nvidia-smi) и подключают GPU-резервы из `docker-compose.gpu.yml` только на
-> GPU-машинах. Без NVIDIA тот же стек поднимется на CPU — без правок файлов.
->
-> **Почему образ с CUDA, а GPU — через override?** Образ собирается с CUDA-сборкой
-> torch, но это только ядра: чтобы контейнер реально увидел карту, Docker должен
-> выдать ему устройство через `deploy.resources.reservations.devices` (nvidia).
-> Вшивать резервы в базовый compose нельзя — тогда `docker compose up` падает
-> с ошибкой "could not select device driver nvidia" на любой машине без GPU.
-> Поэтому: базовый файл CPU-safe, а карта выдаётся только там, где она есть.
+> 💻 **GPU нужен одному сервису — `triton`.** Весь инференс платформы живёт в
+> Triton Inference Server (TensorRT engine YOLOv8, NMS вшит в граф). Консьюмеры
+> обращаются к нему по docker-сети (`TRITON_URL=triton:8001`) и собираются в
+> лёгкий CPU-образ без torch. Без GPU и собранного engine
+> (`models/triton/yolo_detector/1/model.plan`, сборка — внешняя репа
+> `yolo-trt-nms`, см. шапку `docker-compose.yml`) детекций не будет.
 >
 > | Окружение | Команда |
 > |----------------------|---------------------------------------------|
 > | Linux / macOS / WSL2 | `make up` |
 > | Windows | `.\scripts\up.cmd` |
-> | Вручную (CPU) | `docker compose up -d` |
-> | Вручную (GPU) | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` |
->
-> **Важно про ручной GPU-запуск:** override подключается ВМЕСТЕ с базовым
-> файлом — сначала `docker-compose.yml`, потом `docker-compose.gpu.yml`.
-> Если передать только override, проект невалиден (сервисы описаны в базовом).
-> Флаги `-f` ставятся ДО слова `up`.
+> | Вручную | `docker compose up -d` |
 >
 > **Почему `.cmd`, а не `.ps1`:** PowerShell по умолчанию блокирует
 > неподписанные скрипты (ошибка «не имеет цифровой подписи»). `up.cmd`
@@ -210,8 +200,8 @@ uvicorn app.main:app --reload
 streamlit run dashboard/app.py
 
 # Kafka Consumers
-python -m app.consumers.video             # видео: video_requests → YOLO → БД
-python -m app.consumers.yolo_frames yolov8n.pt   # стримы: raw_frames → YOLO → detections (устройство — из DEVICE, auto → cpu без GPU)
+python -m app.consumers.video             # видео: video_requests → Triton → БД
+python -m app.consumers.yolo_frames       # стримы: raw_frames → Triton → detections (адрес — из TRITON_URL)
 python -m app.consumers.detections
 ```
 
@@ -309,14 +299,14 @@ Kafka — транспорт, не хранилище. Все детекции �
 ```
 ├── app/
 │   ├── api/routes/          # API endpoints (videos, streams, analytics)
-│   ├── core/                # Config, database, storage, Kafka topics, CUDA utils, metrics
+│   ├── core/                # Config, database, storage, Kafka topics, metrics
 │   ├── db/models.py         # SQLAlchemy models (Video, Stream, Detection)
 │   ├── schemas/             # Pydantic schemas
-│   ├── processing/          # Обработка видео: processor, detector, extractor
+│   ├── processing/          # Обработка видео: processor, triton_detector, extractor
 │   ├── streams/             # Стримы: reconciler (manager) + FrameProducer
 │   ├── consumers/           # Kafka-консьюмеры (модуль = контейнер)
 │   │   ├── video.py         # video_requests → processor → БД
-│   │   ├── yolo_frames.py   # raw_frames → YOLO → detections + MinIO
+│   │   ├── yolo_frames.py   # raw_frames → Triton → detections + MinIO
 │   │   └── detections.py    # detections → PostgreSQL
 │   └── main.py              # FastAPI entry point
 ├── dashboard/
@@ -326,18 +316,20 @@ Kafka — транспорт, не хранилище. Все детекции �
 │   └── grafana/             # provisioning: datasource + дашборды как код
 ├── alembic/                 # Database migrations
 ├── tests/                   # Test suite
-├── docker-compose.yml       # 14 services (kafka-init — разовый)
-├── Dockerfile               # CUDA-образ: video-consumer, yolo-consumer (инференс)
-├── Dockerfile.cpu           # CPU-образ: api, detection-consumer, stream-manager, dashboard
-└── pyproject.toml           # зависимости (PEP 621): база + extras gpu/dash/dev
+├── docker-compose.yml       # 15 services (kafka-init — разовый, triton — GPU)
+├── Dockerfile.cpu           # единый образ: api, консьюмеры, dashboard (без torch)
+└── pyproject.toml           # зависимости (PEP 621): база + extras triton/dash/dev
 ```
 
 ## Требования
 
 - Docker + Docker Compose
-- NVIDIA GPU + Docker GPU support (для YOLO-инференса)
+- NVIDIA GPU + Docker GPU support — для сервиса `triton`: он единственный
+  делает инференс, без него детекций нет ни у видео, ни у стримов
+- Собранный TensorRT engine в `models/triton/yolo_detector/1/model.plan`
+  (сборка — внешняя репа `yolo-trt-nms`, команда сборки в шапке compose)
 - FFmpeg (для симуляции RTSP с видео-файла)
 
-> Без NVIDIA тоже запустится: `DEVICE=auto` в конфиге выбирает CPU автоматически
-> (см. `app/core/config.py::_detect_device`). GPU-резервы Docker подключает
-> только на NVIDIA-машинах — через `make up` или override-файл (см. выше).
+> Образы контейнеров GPU не требуют: torch в проекте больше нет, консьюмеры
+> ходят в Triton по gRPC. Резервирование устройства описано у сервиса `triton`
+> прямо в базовом `docker-compose.yml` — override-файлы не нужны.
