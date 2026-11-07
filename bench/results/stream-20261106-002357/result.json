@@ -1,0 +1,875 @@
+{
+  "schema_version": 1,
+  "tool": "vision-bench",
+  "pipeline": "stream",
+  "run_id": "stream-20261106-002357",
+  "label": "triton-only + half-decode + no-spin",
+  "created_at": "2026-11-05 21:23:57 UTC",
+  "environment": {
+    "system": "Windows 10 (AMD64)",
+    "cpu_cores": 28,
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "python": "3.12.3",
+    "wall_s": 1917.0,
+    "finished_at": "2026-11-05 21:55:54 UTC"
+  },
+  "config": {
+    "pipeline": "stream",
+    "profile": "default",
+    "label": "triton-only + half-decode + no-spin",
+    "notes": "REDUCED_2, blobFromImage, idle-dispatcher sleep, io8",
+    "source_video": ".\\data\\Praha_air.mp4",
+    "mock": false,
+    "keep_artifacts": false,
+    "measure_drain": true,
+    "scrape_interval_s": 15.0,
+    "criteria": {
+      "stream_e2e_p95_budget_s": 2.0,
+      "rate_match_min": 0.95,
+      "lag_slope_max_per_s": 0.5
+    },
+    "endpoints": {
+      "api": "http://localhost:8000",
+      "prometheus": "http://localhost:9090",
+      "rtsp_publish": "rtsp://localhost:8554/bench/src",
+      "rtsp_source": "rtsp://mediamtx:8554/bench/src"
+    },
+    "stream_profile": {
+      "scale": "streams",
+      "steps": [
+        2,
+        4,
+        6,
+        8,
+        12,
+        16,
+        24
+      ],
+      "fps": 5,
+      "settle_s": 25.0,
+      "measure_s": 90.0
+    }
+  },
+  "source": {
+    "mode": "rtsp",
+    "source_video": "data\\Praha_air.mp4",
+    "clip": "clip_a2c6b40d1abf_60s.mp4",
+    "clip_duration_s": 60.0,
+    "clip_fps": 25.0,
+    "resolution": "1280x720",
+    "codec": "h264",
+    "publish_url": "rtsp://localhost:8554/bench/src",
+    "platform_reads": "rtsp://mediamtx:8554/bench/src"
+  },
+  "steps": [
+    {
+      "index": 1,
+      "offered": {
+        "streams": 2,
+        "fps_per_stream": 5,
+        "offered_fps": 10.0
+      },
+      "actual": {
+        "received_fps": 10.01,
+        "processed_fps": 10.01,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": 0.0695,
+        "p95": 0.098,
+        "p99": 0.1696,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        },
+        "detection-writer": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": {
+          "count": 901.1868,
+          "p50": 0.005,
+          "p95": 0.0095,
+          "p99": 0.0099,
+          "mean": 0.0051
+        },
+        "decode": {
+          "count": 901.1868,
+          "p50": 0.005,
+          "p95": 0.0095,
+          "p99": 0.0099,
+          "mean": 0.005
+        },
+        "inference": {
+          "count": 901.1868,
+          "p50": 0.0342,
+          "p95": 0.0871,
+          "p99": 0.0992,
+          "mean": 0.0385
+        },
+        "queue_detections": {
+          "count": 900.0675,
+          "p50": 0.0162,
+          "p95": 0.0466,
+          "p99": 0.0493,
+          "mean": 0.0198
+        },
+        "write": {
+          "count": 769.5577,
+          "p50": 0.005,
+          "p95": 0.0095,
+          "p99": 0.0099,
+          "mean": 0.0051
+        }
+      },
+      "checks": {
+        "rate_match": true,
+        "lag_stable": true,
+        "latency_budget": true
+      },
+      "verdict": "stable",
+      "failed_checks": [],
+      "window": {
+        "t_start": 1793913931.7947545,
+        "t_end": 1793914021.7881618,
+        "measure_s": 90
+      }
+    },
+    {
+      "index": 2,
+      "offered": {
+        "streams": 4,
+        "fps_per_stream": 5,
+        "offered_fps": 20.0
+      },
+      "actual": {
+        "received_fps": 20.05,
+        "processed_fps": 20.05,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": 0.0718,
+        "p95": 0.0989,
+        "p99": 0.2031,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        },
+        "detection-writer": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": {
+          "count": 1804.5783,
+          "p50": 0.005,
+          "p95": 0.0095,
+          "p99": 0.0099,
+          "mean": 0.005
+        },
+        "decode": {
+          "count": 1804.5783,
+          "p50": 0.005,
+          "p95": 0.0095,
+          "p99": 0.0099,
+          "mean": 0.005
+        },
+        "inference": {
+          "count": 1804.5783,
+          "p50": 0.0325,
+          "p95": 0.0778,
+          "p99": 0.0963,
+          "mean": 0.0352
+        },
+        "queue_detections": {
+          "count": 1800.0675,
+          "p50": 0.014,
+          "p95": 0.0464,
+          "p99": 0.0493,
+          "mean": 0.0189
+        },
+        "write": {
+          "count": 984.4119,
+          "p50": 0.005,
+          "p95": 0.0095,
+          "p99": 0.0099,
+          "mean": 0.0051
+        }
+      },
+      "checks": {
+        "rate_match": true,
+        "lag_stable": true,
+        "latency_budget": true
+      },
+      "verdict": "stable",
+      "failed_checks": [],
+      "window": {
+        "t_start": 1793914110.3537884,
+        "t_end": 1793914200.3494425,
+        "measure_s": 90
+      }
+    },
+    {
+      "index": 3,
+      "offered": {
+        "streams": 6,
+        "fps_per_stream": 5,
+        "offered_fps": 30.0
+      },
+      "actual": {
+        "received_fps": 29.99,
+        "processed_fps": 29.99,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": 0.0718,
+        "p95": 0.0974,
+        "p99": 0.0997,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        },
+        "detection-writer": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": {
+          "count": 2698.9933,
+          "p50": 0.0052,
+          "p95": 0.0099,
+          "p99": 0.0392,
+          "mean": 0.0059
+        },
+        "decode": {
+          "count": 2698.9933,
+          "p50": 0.0052,
+          "p95": 0.0098,
+          "p99": 0.0363,
+          "mean": 0.0057
+        },
+        "inference": {
+          "count": 2698.9933,
+          "p50": 0.0301,
+          "p95": 0.0482,
+          "p99": 0.0498,
+          "mean": 0.0302
+        },
+        "queue_detections": {
+          "count": 2700.135,
+          "p50": 0.014,
+          "p95": 0.0464,
+          "p99": 0.0493,
+          "mean": 0.0189
+        },
+        "write": {
+          "count": 1181.3091,
+          "p50": 0.005,
+          "p95": 0.0095,
+          "p99": 0.0099,
+          "mean": 0.0051
+        }
+      },
+      "checks": {
+        "rate_match": true,
+        "lag_stable": true,
+        "latency_budget": true
+      },
+      "verdict": "stable",
+      "failed_checks": [],
+      "window": {
+        "t_start": 1793914292.0587788,
+        "t_end": 1793914382.0560687,
+        "measure_s": 90
+      }
+    },
+    {
+      "index": 4,
+      "offered": {
+        "streams": 8,
+        "fps_per_stream": 5,
+        "offered_fps": 40.0
+      },
+      "actual": {
+        "received_fps": 40.03,
+        "processed_fps": 39.98,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": 0.0769,
+        "p95": 0.1783,
+        "p99": 0.2357,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        },
+        "detection-writer": {
+          "slope_per_s": -0.011,
+          "end": 0.0,
+          "max": 6.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": {
+          "count": 3602.407,
+          "p50": 0.0057,
+          "p95": 0.034,
+          "p99": 0.0471,
+          "mean": 0.0081
+        },
+        "decode": {
+          "count": 3602.407,
+          "p50": 0.0056,
+          "p95": 0.0322,
+          "p99": 0.0464,
+          "mean": 0.0078
+        },
+        "inference": {
+          "count": 3597.9068,
+          "p50": 0.0312,
+          "p95": 0.057,
+          "p99": 0.0914,
+          "mean": 0.0326
+        },
+        "queue_detections": {
+          "count": 3602.4301,
+          "p50": 0.014,
+          "p95": 0.0464,
+          "p99": 0.0493,
+          "mean": 0.0189
+        },
+        "write": {
+          "count": 1487.3244,
+          "p50": 0.0051,
+          "p95": 0.0097,
+          "p99": 0.034,
+          "mean": 0.0056
+        }
+      },
+      "checks": {
+        "rate_match": true,
+        "lag_stable": true,
+        "latency_budget": true
+      },
+      "verdict": "stable",
+      "failed_checks": [],
+      "window": {
+        "t_start": 1793914470.8575733,
+        "t_end": 1793914560.8510695,
+        "measure_s": 90
+      }
+    },
+    {
+      "index": 5,
+      "offered": {
+        "streams": 12,
+        "fps_per_stream": 5,
+        "offered_fps": 60.0
+      },
+      "actual": {
+        "received_fps": 59.87,
+        "processed_fps": 59.86,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": 0.1326,
+        "p95": 0.2383,
+        "p99": 0.2477,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": -0.006,
+          "end": 7.0,
+          "max": 8.0
+        },
+        "detection-writer": {
+          "slope_per_s": 0.002,
+          "end": 1.0,
+          "max": 3.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": {
+          "count": 5388.0649,
+          "p50": 0.0076,
+          "p95": 0.0456,
+          "p99": 0.0648,
+          "mean": 0.0142
+        },
+        "decode": {
+          "count": 5388.0649,
+          "p50": 0.0072,
+          "p95": 0.0436,
+          "p99": 0.049,
+          "mean": 0.0126
+        },
+        "inference": {
+          "count": 5386.9399,
+          "p50": 0.0427,
+          "p95": 0.0944,
+          "p99": 0.0996,
+          "mean": 0.0482
+        },
+        "queue_detections": {
+          "count": 5398.3573,
+          "p50": 0.0169,
+          "p95": 0.0467,
+          "p99": 0.0493,
+          "mean": 0.0201
+        },
+        "write": {
+          "count": 2060.1068,
+          "p50": 0.0055,
+          "p95": 0.0282,
+          "p99": 0.0456,
+          "mean": 0.0073
+        }
+      },
+      "checks": {
+        "rate_match": true,
+        "lag_stable": true,
+        "latency_budget": true
+      },
+      "verdict": "stable",
+      "failed_checks": [],
+      "window": {
+        "t_start": 1793914716.7567053,
+        "t_end": 1793914806.755195,
+        "measure_s": 90
+      }
+    },
+    {
+      "index": 6,
+      "offered": {
+        "streams": 16,
+        "fps_per_stream": 5,
+        "offered_fps": 80.0
+      },
+      "actual": {
+        "received_fps": 79.99,
+        "processed_fps": 80.01,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": 0.166,
+        "p95": 0.2434,
+        "p99": 0.2824,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": -0.007,
+          "end": 15.0,
+          "max": 15.0
+        },
+        "detection-writer": {
+          "slope_per_s": 0.014,
+          "end": 1.0,
+          "max": 8.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": {
+          "count": 7199.505,
+          "p50": 0.0108,
+          "p95": 0.0769,
+          "p99": 0.0965,
+          "mean": 0.0227
+        },
+        "decode": {
+          "count": 7199.505,
+          "p50": 0.0092,
+          "p95": 0.0468,
+          "p99": 0.0656,
+          "mean": 0.0171
+        },
+        "inference": {
+          "count": 7201.7552,
+          "p50": 0.0614,
+          "p95": 0.1243,
+          "p99": 0.2249,
+          "mean": 0.0643
+        },
+        "queue_detections": {
+          "count": 7200.6301,
+          "p50": 0.0207,
+          "p95": 0.0477,
+          "p99": 0.0588,
+          "mean": 0.0228
+        },
+        "write": {
+          "count": 2607.9782,
+          "p50": 0.0063,
+          "p95": 0.041,
+          "p99": 0.0488,
+          "mean": 0.0106
+        }
+      },
+      "checks": {
+        "rate_match": true,
+        "lag_stable": true,
+        "latency_budget": true
+      },
+      "verdict": "stable",
+      "failed_checks": [],
+      "window": {
+        "t_start": 1793914963.4076068,
+        "t_end": 1793915053.4177125,
+        "measure_s": 90
+      }
+    },
+    {
+      "index": 7,
+      "offered": {
+        "streams": 24,
+        "fps_per_stream": 5,
+        "offered_fps": 120.0
+      },
+      "actual": {
+        "received_fps": 90.27,
+        "processed_fps": 90.22,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": 42.269,
+        "p95": 58.2269,
+        "p99": 59.6454,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": 29.91,
+          "end": 5919.0,
+          "max": 5919.0
+        },
+        "detection-writer": {
+          "slope_per_s": 0.024,
+          "end": 12.0,
+          "max": 12.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": {
+          "count": 8125.3044,
+          "p50": 40.9816,
+          "p95": 58.0982,
+          "p99": 59.6196,
+          "mean": 40.7742
+        },
+        "decode": {
+          "count": 8124.1792,
+          "p50": 0.0352,
+          "p95": 0.0909,
+          "p99": 0.0995,
+          "mean": 0.0401
+        },
+        "inference": {
+          "count": 8120.804,
+          "p50": 0.1732,
+          "p95": 0.3754,
+          "p99": 0.4838,
+          "mean": 0.1842
+        },
+        "queue_detections": {
+          "count": 8094.0594,
+          "p50": 0.0289,
+          "p95": 0.0496,
+          "p99": 0.0889,
+          "mean": 0.0298
+        },
+        "write": {
+          "count": 2287.3537,
+          "p50": 0.0124,
+          "p95": 0.0465,
+          "p99": 0.0496,
+          "mean": 0.0186
+        }
+      },
+      "checks": {
+        "rate_match": true,
+        "lag_stable": false,
+        "latency_budget": false
+      },
+      "verdict": "saturated",
+      "failed_checks": [
+        "lag_stable",
+        "latency_budget"
+      ],
+      "window": {
+        "t_start": 1793915346.8937962,
+        "t_end": 1793915436.9094434,
+        "measure_s": 90
+      }
+    }
+  ],
+  "timeline": [
+    {
+      "t": 1793913837.576,
+      "phase": "run_start",
+      "step": null,
+      "detail": "run_id=stream-20261106-002357, конвейер stream, профиль default"
+    },
+    {
+      "t": 1793913840.316,
+      "phase": "load_apply",
+      "step": 1,
+      "detail": "цель ступени: 2"
+    },
+    {
+      "t": 1793913906.792,
+      "phase": "load_applied",
+      "step": 1,
+      "detail": "2 стрим(ов) активны, подача 10 fps, развёртывание 66с"
+    },
+    {
+      "t": 1793913931.795,
+      "phase": "measure_start",
+      "step": 1,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793914021.84,
+      "phase": "step_done",
+      "step": 1,
+      "detail": "вердикт stable"
+    },
+    {
+      "t": 1793914021.84,
+      "phase": "load_apply",
+      "step": 2,
+      "detail": "цель ступени: 4"
+    },
+    {
+      "t": 1793914085.351,
+      "phase": "load_applied",
+      "step": 2,
+      "detail": "4 стрим(ов) активны, подача 20 fps, развёртывание 64с"
+    },
+    {
+      "t": 1793914110.354,
+      "phase": "measure_start",
+      "step": 2,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793914200.382,
+      "phase": "step_done",
+      "step": 2,
+      "detail": "вердикт stable"
+    },
+    {
+      "t": 1793914200.382,
+      "phase": "load_apply",
+      "step": 3,
+      "detail": "цель ступени: 6"
+    },
+    {
+      "t": 1793914267.055,
+      "phase": "load_applied",
+      "step": 3,
+      "detail": "6 стрим(ов) активны, подача 30 fps, развёртывание 67с"
+    },
+    {
+      "t": 1793914292.059,
+      "phase": "measure_start",
+      "step": 3,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793914382.093,
+      "phase": "step_done",
+      "step": 3,
+      "detail": "вердикт stable"
+    },
+    {
+      "t": 1793914382.093,
+      "phase": "load_apply",
+      "step": 4,
+      "detail": "цель ступени: 8"
+    },
+    {
+      "t": 1793914445.853,
+      "phase": "load_applied",
+      "step": 4,
+      "detail": "8 стрим(ов) активны, подача 40 fps, развёртывание 64с"
+    },
+    {
+      "t": 1793914470.858,
+      "phase": "measure_start",
+      "step": 4,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793914560.893,
+      "phase": "step_done",
+      "step": 4,
+      "detail": "вердикт stable"
+    },
+    {
+      "t": 1793914560.893,
+      "phase": "load_apply",
+      "step": 5,
+      "detail": "цель ступени: 12"
+    },
+    {
+      "t": 1793914691.753,
+      "phase": "load_applied",
+      "step": 5,
+      "detail": "12 стрим(ов) активны, подача 60 fps, развёртывание 131с"
+    },
+    {
+      "t": 1793914716.757,
+      "phase": "measure_start",
+      "step": 5,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793914806.801,
+      "phase": "step_done",
+      "step": 5,
+      "detail": "вердикт stable"
+    },
+    {
+      "t": 1793914806.802,
+      "phase": "load_apply",
+      "step": 6,
+      "detail": "цель ступени: 16"
+    },
+    {
+      "t": 1793914938.421,
+      "phase": "load_applied",
+      "step": 6,
+      "detail": "16 стрим(ов) активны, подача 80 fps, развёртывание 132с"
+    },
+    {
+      "t": 1793914963.408,
+      "phase": "measure_start",
+      "step": 6,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793915053.497,
+      "phase": "step_done",
+      "step": 6,
+      "detail": "вердикт stable"
+    },
+    {
+      "t": 1793915053.497,
+      "phase": "load_apply",
+      "step": 7,
+      "detail": "цель ступени: 24"
+    },
+    {
+      "t": 1793915321.904,
+      "phase": "load_applied",
+      "step": 7,
+      "detail": "24 стрим(ов) активны, подача 120 fps, развёртывание 268с"
+    },
+    {
+      "t": 1793915346.894,
+      "phase": "measure_start",
+      "step": 7,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793915437.017,
+      "phase": "step_done",
+      "step": 7,
+      "detail": "вердикт saturated; провалено: lag_stable, latency_budget"
+    },
+    {
+      "t": 1793915437.017,
+      "phase": "drain_start",
+      "step": null,
+      "detail": "снимаю нагрузку, смотрю разгребание бэклога"
+    },
+    {
+      "t": 1793915497.555,
+      "phase": "drain_end",
+      "step": null,
+      "detail": "бэклог разгреблен за 61с"
+    },
+    {
+      "t": 1793915497.556,
+      "phase": "run_end",
+      "step": null,
+      "detail": "нагрузка снята, измерения завершены"
+    }
+  ],
+  "drain": {
+    "description": "сколько система разгребала очереди после снятия нагрузки",
+    "duration_s": 60.5,
+    "timeout_s": 180.0,
+    "timed_out": false,
+    "final_lag": {
+      "yolo-workers": 0.0,
+      "detection-writer": 0.0
+    },
+    "cleared": true
+  },
+  "summary": {
+    "max_sustainable": {
+      "step": 6,
+      "offered": 80.0,
+      "units": "fps"
+    },
+    "collapse_point": {
+      "step": 7,
+      "offered": 120.0
+    },
+    "not_saturated": false,
+    "early_failure_step": null,
+    "bottleneck": {
+      "stage": "yolo-consumer",
+      "reference_step": 7,
+      "e2e_budget_shares": {
+        "queue_raw_frames": 0.993,
+        "inference": 0.004,
+        "decode": 0.001,
+        "queue_detections": 0.001,
+        "write": 0.0
+      },
+      "evidence": [
+        "лаг yolo-workers растёт на +29.9 сообщ/с — консьюмер не успевает за подачей",
+        "бэклог до yolo-consumer: 99% бюджета e2e",
+        "на шаге 7: ожидание в raw_frames (бэклог до yolo-consumer) — 99% бюджета e2e",
+        "внутри стадии: инференс (inference 0.184с против 0.040с на кадр)"
+      ]
+    },
+    "health": {
+      "error_frames_approx": 0,
+      "steps_saturated": 1
+    }
+  }
+}

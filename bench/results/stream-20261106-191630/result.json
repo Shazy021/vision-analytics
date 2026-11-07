@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "tool": "vision-bench",
+  "pipeline": "stream",
+  "run_id": "stream-20261106-191630",
+  "label": "no-reduced + uint8-input",
+  "created_at": "2026-11-06 16:16:30 UTC",
+  "environment": {
+    "system": "Windows 10 (AMD64)",
+    "cpu_cores": 28,
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "python": "3.12.3",
+    "wall_s": 190.4,
+    "finished_at": "2026-11-06 16:19:40 UTC"
+  },
+  "config": {
+    "pipeline": "stream",
+    "profile": "default",
+    "label": "no-reduced + uint8-input",
+    "notes": "полный декод, uint8-вход engine, FP16 compute",
+    "source_video": "data\\Praha_air.mp4",
+    "mock": false,
+    "keep_artifacts": false,
+    "measure_drain": true,
+    "scrape_interval_s": 15.0,
+    "criteria": {
+      "stream_e2e_p95_budget_s": 2.0,
+      "rate_match_min": 0.95,
+      "lag_slope_max_per_s": 0.5
+    },
+    "endpoints": {
+      "api": "http://localhost:8000",
+      "prometheus": "http://localhost:9090",
+      "rtsp_publish": "rtsp://localhost:8554/bench/src",
+      "rtsp_source": "rtsp://mediamtx:8554/bench/src"
+    },
+    "stream_profile": {
+      "scale": "streams",
+      "steps": [
+        2,
+        4,
+        6,
+        8,
+        12,
+        16,
+        24
+      ],
+      "fps": 5,
+      "settle_s": 25.0,
+      "measure_s": 90.0
+    }
+  },
+  "source": {
+    "mode": "rtsp",
+    "source_video": "data\\Praha_air.mp4",
+    "clip": "clip_a2c6b40d1abf_60s.mp4",
+    "clip_duration_s": 60.0,
+    "clip_fps": 25.0,
+    "resolution": "1280x720",
+    "codec": "h264",
+    "publish_url": "rtsp://localhost:8554/bench/src",
+    "platform_reads": "rtsp://mediamtx:8554/bench/src"
+  },
+  "steps": [
+    {
+      "index": 1,
+      "offered": {
+        "streams": 2,
+        "fps_per_stream": 5,
+        "offered_fps": 10.0
+      },
+      "actual": {
+        "received_fps": 0.0,
+        "processed_fps": null,
+        "error_fps": null
+      },
+      "latency": {
+        "metric": "frame_e2e_latency_seconds (захват кадра → коммит в БД)",
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "budget_s": 2.0
+      },
+      "lag": {
+        "yolo-workers": {
+          "slope_per_s": 9.714,
+          "end": 1374.0,
+          "max": 1374.0
+        },
+        "detection-writer": {
+          "slope_per_s": 0.0,
+          "end": 0.0,
+          "max": 0.0
+        }
+      },
+      "stages": {
+        "queue_raw_frames": null,
+        "decode": null,
+        "inference": null,
+        "queue_detections": null,
+        "write": null
+      },
+      "checks": {
+        "rate_match": false,
+        "lag_stable": false,
+        "latency_budget": false
+      },
+      "verdict": "saturated",
+      "failed_checks": [
+        "rate_match",
+        "lag_stable",
+        "latency_budget"
+      ],
+      "window": {
+        "t_start": 1793981884.5778627,
+        "t_end": 1793981974.5739145,
+        "measure_s": 90
+      }
+    }
+  ],
+  "timeline": [
+    {
+      "t": 1793981790.385,
+      "phase": "run_start",
+      "step": null,
+      "detail": "run_id=stream-20261106-191630, конвейер stream, профиль default"
+    },
+    {
+      "t": 1793981793.159,
+      "phase": "load_apply",
+      "step": 1,
+      "detail": "цель ступени: 2"
+    },
+    {
+      "t": 1793981859.574,
+      "phase": "load_applied",
+      "step": 1,
+      "detail": "2 стрим(ов) активны, подача 10 fps, развёртывание 66с"
+    },
+    {
+      "t": 1793981884.578,
+      "phase": "measure_start",
+      "step": 1,
+      "detail": "окно 90с"
+    },
+    {
+      "t": 1793981974.61,
+      "phase": "step_done",
+      "step": 1,
+      "detail": "вердикт saturated; провалено: rate_match, lag_stable, latency_budget"
+    },
+    {
+      "t": 1793981974.61,
+      "phase": "load_apply",
+      "step": 2,
+      "detail": "цель ступени: 4"
+    },
+    {
+      "t": 1793981980.631,
+      "phase": "abort",
+      "step": null,
+      "detail": "KeyboardInterrupt"
+    }
+  ],
+  "drain": null,
+  "summary": {
+    "max_sustainable": {
+      "step": null,
+      "offered": null,
+      "units": "fps"
+    },
+    "collapse_point": {
+      "step": 1,
+      "offered": 10.0
+    },
+    "not_saturated": false,
+    "early_failure_step": null,
+    "bottleneck": {
+      "stage": "yolo-consumer",
+      "reference_step": 1,
+      "e2e_budget_shares": {},
+      "evidence": [
+        "лаг yolo-workers растёт на +9.7 сообщ/с — консьюмер не успевает за подачей"
+      ]
+    },
+    "health": {
+      "error_frames_approx": 0,
+      "steps_saturated": 1
+    },
+    "aborted": "прервано оператором (Ctrl+C)"
+  }
+}
