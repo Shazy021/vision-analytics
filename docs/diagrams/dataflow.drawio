@@ -1,11 +1,11 @@
-<mxfile>
+<mxfile host="app.diagrams.net">
   <diagram id="system" name="System">
-    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="0" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="760" math="0" shadow="0">
+    <mxGraphModel dx="1530" dy="1493" grid="1" gridSize="10" guides="1" tooltips="0" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="760" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
         <mxCell id="user" data-kind="actor" data-model-id="user" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;E:\\Projects\\Video_Analytics_platform\\docs\\diagrams\\dataflow.ir.json&quot;}" data-source-label="Оператор / Браузер" data-source-properties="{}" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;" value="Оператор / Браузер" vertex="1">
-          <mxGeometry height="90" width="140" x="40" y="80" as="geometry" />
+          <mxGeometry height="110" width="140" x="40" y="60" as="geometry" />
         </mxCell>
         <mxCell id="dashboard" data-kind="service" data-model-id="dashboard" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:74}" data-source-label="dashboard&#xa;Streamlit :8501" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="dashboard&#xa;Streamlit :8501" vertex="1">
           <mxGeometry height="90" width="200" x="240" y="80" as="geometry" />
@@ -19,14 +19,17 @@
         <mxCell id="minio" data-kind="database" data-model-id="minio" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:315}" data-source-label="MinIO (S3)&#xa;videos · frames" data-source-properties="{}" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="MinIO (S3)&#xa;videos · frames" vertex="1">
           <mxGeometry height="90" width="200" x="40" y="340" as="geometry" />
         </mxCell>
-        <mxCell id="video-consumer" data-kind="service" data-model-id="video-consumer" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:212}" data-source-label="video-consumer ×2&#xa;GPU, YOLO" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="video-consumer ×2&#xa;GPU, YOLO" vertex="1">
+        <mxCell id="video-consumer" data-kind="service" data-model-id="video-consumer" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:212}" data-source-label="video-consumer ×2&#xa;presigned-read → Triton" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="video-consumer ×2&#xa;presigned-read → Triton" vertex="1">
           <mxGeometry height="90" width="200" x="300" y="340" as="geometry" />
         </mxCell>
-        <mxCell id="yolo-consumer" data-kind="service" data-model-id="yolo-consumer" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:159}" data-source-label="yolo-consumer&#xa;GPU, YOLO" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="yolo-consumer&#xa;GPU, YOLO" vertex="1">
+        <mxCell id="yolo-consumer" data-kind="service" data-model-id="yolo-consumer" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:159}" data-source-label="yolo-consumer ×2&#xa;async → Triton" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="yolo-consumer ×2&#xa;async → Triton" vertex="1">
           <mxGeometry height="90" width="200" x="560" y="340" as="geometry" />
         </mxCell>
+        <mxCell id="triton" data-kind="service" data-model-id="triton" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:173}" data-source-label="Triton Inference Server&#xa;TensorRT engine, NMS в графе" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="Triton Inference Server&#xa;:8001 gRPC · TensorRT engine&#xa;(NMS в графе) · GPU" vertex="1">
+          <mxGeometry height="90" width="200" x="820" y="600" as="geometry" />
+        </mxCell>
         <mxCell id="detection-consumer" data-kind="service" data-model-id="detection-consumer" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:250}" data-source-label="detection-consumer" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="detection-consumer" vertex="1">
-          <mxGeometry height="90" width="200" x="820" y="335" as="geometry" />
+          <mxGeometry height="90" width="200" x="820" y="340" as="geometry" />
         </mxCell>
         <mxCell id="stream-manager" data-kind="service" data-model-id="stream-manager" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:280}" data-source-label="stream-manager&#xa;reconcile loop" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="stream-manager&#xa;reconcile loop" vertex="1">
           <mxGeometry height="90" width="200" x="1080" y="340" as="geometry" />
@@ -34,20 +37,25 @@
         <mxCell id="producer" data-kind="external" data-model-id="producer" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;app/streams/producer.py&quot;}" data-source-label="stream producer&#xa;(дочерний процесс)" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5f5f5;strokeColor=#666666;" value="stream producer&#xa;(дочерний процесс)" vertex="1">
           <mxGeometry height="90" width="200" x="1330" y="80" as="geometry" />
         </mxCell>
-        <mxCell id="db" data-kind="database" data-model-id="db" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:23}" data-source-label="PostgreSQL&#xa;videos · streams · detections" data-source-properties="{}" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="PostgreSQL&#xa;videos · streams · detections" vertex="1">
+        <mxCell id="db" data-kind="database" data-model-id="db" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:23}" data-source-label="PostgreSQL&#xa;videos · streams · video_detections · stream_detections" data-source-properties="{}" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="PostgreSQL&#xa;videos · streams · video_detections · stream_detections" vertex="1">
           <mxGeometry height="90" width="200" x="300" y="600" as="geometry" />
         </mxCell>
         <mxCell id="mediamtx" data-kind="external" data-model-id="mediamtx" data-properties="{}" data-provenance="{&quot;path&quot;:&quot;docker-compose.yml&quot;,&quot;line&quot;:304}" data-source-label="MediaMTX&#xa;RTSP :8554" data-source-properties="{}" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#f5f5f5;strokeColor=#666666;" value="MediaMTX&#xa;RTSP :8554" vertex="1">
           <mxGeometry height="90" width="200" x="1350" y="600" as="geometry" />
         </mxCell>
         <mxCell id="edge-system-0" data-kind="sync" data-model-id="user-dashboard" data-properties="{}" data-source-label=":8501" data-source-properties="{}" edge="1" parent="1" source="user" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" target="dashboard" value=":8501">
-          <mxGeometry relative="1" as="geometry" />
+          <mxGeometry relative="1" x="-0.0769" as="geometry">
+            <Array as="points">
+              <mxPoint x="190" y="125" />
+              <mxPoint x="190" y="125" />
+            </Array>
+          </mxGeometry>
         </mxCell>
-        <mxCell id="edge-system-1" data-kind="sync" data-model-id="user-api" data-properties="{}" data-source-label="upload видео" data-source-properties="{}" edge="1" parent="1" source="user" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" target="api" value="upload видео">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="edge-system-1" data-kind="sync" data-model-id="user-api" data-properties="{}" data-source-label="upload видео" data-source-properties="{}" edge="1" parent="1" source="user" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" target="api" value="upload видео">
+          <mxGeometry relative="1" x="0.1346" as="geometry">
             <Array as="points">
               <mxPoint x="110" y="40" />
-              <mxPoint x="640" y="40" />
+              <mxPoint x="570" y="40" />
             </Array>
           </mxGeometry>
         </mxCell>
@@ -55,10 +63,16 @@
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="edge-system-3" data-kind="async" data-model-id="api-kafka" data-properties="{}" data-source-label="video_requests (чанки)" data-source-properties="{}" edge="1" parent="1" source="api" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" target="kafka" value="video_requests (чанки)">
-          <mxGeometry relative="1" as="geometry" />
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="620" y="60" />
+              <mxPoint x="980" y="60" />
+            </Array>
+          </mxGeometry>
         </mxCell>
         <mxCell id="edge-system-4" data-kind="sync" data-model-id="api-db" data-properties="{}" data-source-label="videos · desired_status" data-source-properties="{}" edge="1" parent="1" source="api" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" target="db" value="videos · desired_status">
-          <mxGeometry relative="1" as="geometry">
+          <mxGeometry relative="1" x="0.0331" as="geometry">
+            <mxPoint as="offset" />
             <Array as="points">
               <mxPoint x="540" y="200" />
               <mxPoint x="380" y="200" />
@@ -129,19 +143,22 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="edge-system-13" data-kind="sync" data-model-id="detection-consumer-db" data-properties="{}" data-source-label="INSERT detections" data-source-properties="{}" edge="1" parent="1" source="detection-consumer" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" target="db" value="INSERT detections">
-          <mxGeometry relative="1" as="geometry">
+        <mxCell id="edge-system-13" data-kind="sync" data-model-id="detection-consumer-db" data-properties="{}" data-source-label="INSERT detections" data-source-properties="{}" edge="1" parent="1" source="detection-consumer" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.855;entryY=0;entryDx=0;entryDy=4.35;entryPerimeter=0;" target="db" value="INSERT detections">
+          <mxGeometry relative="1" x="0.0731" as="geometry">
+            <mxPoint as="offset" />
             <Array as="points">
-              <mxPoint x="880" y="510" />
-              <mxPoint x="460" y="510" />
+              <mxPoint x="920" y="520" />
+              <mxPoint x="470" y="520" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="edge-system-14" data-kind="sync" data-model-id="db-stream-manager" data-properties="{}" data-source-label="desired / actual" data-source-properties="{}" edge="1" parent="1" source="db" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" target="stream-manager" value="desired / actual">
-          <mxGeometry relative="1" x="-0.2402" as="geometry">
+        <mxCell id="edge-system-14" data-kind="sync" data-model-id="db-stream-manager" data-properties="{}" data-source-label="desired / actual" data-source-properties="{}" edge="1" parent="1" source="db" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="stream-manager" value="desired / actual">
+          <mxGeometry relative="1" x="-0.0424" as="geometry">
             <mxPoint as="offset" />
             <Array as="points">
-              <mxPoint x="1180" y="645" />
+              <mxPoint x="540" y="645" />
+              <mxPoint x="540" y="705" />
+              <mxPoint x="1180" y="705" />
             </Array>
           </mxGeometry>
         </mxCell>
@@ -162,6 +179,24 @@
         </mxCell>
         <mxCell id="edge-system-17" data-kind="async" data-model-id="producer-kafka" data-properties="{}" data-source-label="raw_frames" data-source-properties="{}" edge="1" parent="1" source="producer" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;" target="kafka" value="raw_frames">
           <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-triton-0" data-kind="sync" data-model-id="video-consumer-triton" data-properties="{}" data-source-label="gRPC per-sample" data-source-properties="{}" edge="1" parent="1" source="video-consumer" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.444;entryDx=0;entryDy=0;" target="triton" value="gRPC per-sample">
+          <mxGeometry relative="1" x="0.3739" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="530" y="385" />
+              <mxPoint x="530" y="640" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge-triton-1" data-kind="sync" data-model-id="yolo-consumer-triton" data-properties="{}" data-source-label="gRPC async · in-flight 32–64" data-source-properties="{}" edge="1" parent="1" source="yolo-consumer" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endSize=8;exitX=0.9;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="triton" value="gRPC async · in-flight 32–64">
+          <mxGeometry relative="1" x="0.1429" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="740" y="540" />
+              <mxPoint x="920" y="540" />
+            </Array>
+          </mxGeometry>
         </mxCell>
         <mxCell id="edge-system-18" data-kind="sync" data-model-id="minio-user" data-properties="{&quot;dashed&quot;:&quot;true&quot;}" data-source-label="presigned URL" data-source-properties="{&quot;dashed&quot;:&quot;true&quot;}" edge="1" parent="1" source="minio" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;endArrow=block;endSize=8;" target="user" value="presigned URL">
           <mxGeometry relative="1" as="geometry">
