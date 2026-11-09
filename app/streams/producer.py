@@ -172,7 +172,7 @@ class FrameProducer:
         reopen_on_end = not is_rtsp and self.stream_id is not None
 
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        frame_interval = max(1, int(src_fps / self.fps))
+        target_period = 1.0 / self.fps
         # Сквозной номер кадра (ключ в MinIO); продолжается с прошлого
         # максимума — см. _initial_frame_index().
         frame_index = self._initial_frame_index()
@@ -185,6 +185,16 @@ class FrameProducer:
         frame_period = 1.0 / src_fps
         next_read = time.monotonic()
 
+        # Отбор кадров по НАСТОЯЩЕМУ ВРЕМЕНИ, а не целым шагом по номеру
+        # кадра. Раньше брали каждый int(src_fps/fps)-й кадр: на источнике
+        # 25 fps при fps=10 это int(2.5)=2 → каждый 2-й → 12.5 fps вместо
+        # заказанных 10 — целочисленный skip умеет только делители частоты
+        # источника. Теперь кадр уходит, когда с прошлой отправки прошло
+        # >= 1/fps: частота держится на любом src_fps. Если источник сам
+        # медленнее заказанного fps, шлём каждый кадр — быстрее источника
+        # не выжать.
+        next_send = time.monotonic()
+
         logger.info(
             "Streaming → Kafka '%s' at %d fps (source=%s, stream_id=%s%s)",
             TOPIC_RAW_FRAMES, self.fps, self.source, self.stream_id,
@@ -193,8 +203,14 @@ class FrameProducer:
 
         try:
             while True:
-                ret, frame = cap.read()
-                if not ret:
+                # grab() читает кадр, но не делает цветовой перевод и копию
+                # в Mat — их (retrieve) делаем только для кадра, который
+                # реально уходит в Kafka. Сам H.264-декод идёт на КАЖДОМ
+                # кадре источника: P/B-кадры опираются на предыдущие, GOP
+                # нельзя раскодировать «с пропуском». Поэтому экономия тут
+                # на постобработке выброшенных кадров, а не на декоде.
+                grabbed = cap.grab()
+                if not grabbed:
                     if reopen_on_end:
                         cap.release()
                         time.sleep(OPEN_RETRY_DELAY)
@@ -219,7 +235,22 @@ class FrameProducer:
                         time.sleep(next_read - now)
                     next_read = time.monotonic() + frame_period
 
-                if frame_index % frame_interval == 0:
+                now = time.monotonic()
+                if now >= next_send:
+                    # План следующей отправки; если отстали (источник встал
+                    # или просадка часов) — не догоняем пачкой, а
+                    # пересинхронизируемся на «сейчас», иначе после stalls
+                    # частота на время улетела бы выше заказа.
+                    next_send += target_period
+                    if next_send < now:
+                        next_send = now
+
+                    ret, frame = cap.retrieve()
+                    if not ret:
+                        logger.warning("Кадр не раскодировался — пропущен (frame_index=%d)", frame_index)
+                        frame_index += 1
+                        continue
+
                     ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     if not ok:
                         logger.warning("Кадр не закодировался в JPEG — пропущен (frame_index=%d)", frame_index)
