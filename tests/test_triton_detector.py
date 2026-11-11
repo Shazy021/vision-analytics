@@ -14,6 +14,7 @@ from app.processing.triton_detector import (
     ENGINE_MAX_BATCH,
     INPUT_SIZE,
     TritonDetector,
+    letterbox_geom,
 )
 
 
@@ -264,3 +265,92 @@ def test_detect_single_wraps_into_batch():
 def test_not_ready_raises():
     with pytest.raises(RuntimeError, match="not ready"):
         TritonDetector(url="fake:8001", client=FakeClient(ready=False))
+
+
+# ---------------------------------------------------------------------------
+# JPEG-intake (ансамбль yolo_jpeg: предобработка в DALI на GPU)
+# ---------------------------------------------------------------------------
+
+def test_letterbox_geom_matches_preprocess():
+    """letterbox_geom(w,h) обязан совпадать с геометрией _preprocess — иначе
+    jpeg-путь (обратный ход из размеров) разъедется с cv2-путём (из кадра)."""
+    for (h, w) in [(720, 1280), (1080, 1920), (480, 853), (640, 640)]:
+        det = _detector()
+        _tensor, geom = det._preprocess(_frame(h=h, w=w))
+        assert geom == letterbox_geom(w, h), f"{w}x{h}"
+
+
+def test_prepare_jpeg_returns_bytes_and_geom(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "triton_jpeg_pad", 0)
+    det = _detector(jpeg_intake=True)
+    jb = b"\xff\xd8\xff\xd9"  # условные JPEG-байты
+    payload, geom = det.prepare_jpeg(jb, 1280, 720)
+    assert payload == jb
+    assert geom == letterbox_geom(1280, 720)
+
+
+def test_prepare_jpeg_pads_to_bucket(monkeypatch):
+    """TRITON_JPEG_PAD: длина округляется вверх до кратного бакету —
+    иначе динамический батчинг Triton'а не склеивает кадры разной длины."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "triton_jpeg_pad", 1024)
+    det = _detector(jpeg_intake=True)
+    jb = b"\xff\xd8" + b"\x01" * 100
+    payload, _geom = det.prepare_jpeg(jb, 1280, 720)
+    assert len(payload) == 1024
+    assert payload.startswith(jb)
+    assert payload[len(jb):] == bytes(1024 - len(jb))
+
+
+def test_prepare_jpeg_bucket_exact_multiple_untouched(monkeypatch):
+    """Длина кратна бакету — байты не трогаем вообще."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "triton_jpeg_pad", 64)
+    det = _detector(jpeg_intake=True)
+    jb = b"\xff\xd8" + b"\x01" * 62  # ровно 64 байта
+    payload, _geom = det.prepare_jpeg(jb, 1280, 720)
+    assert payload == jb
+
+
+class FakeAsyncClient:
+    """Заглушка для async_infer: ловит вход (имя/форму) в .sent."""
+
+    def __init__(self):
+        self.sent = []
+
+    def is_model_ready(self, name):
+        return True
+
+    def async_infer(self, model_name, inputs, outputs, callback, request_id):
+        self.sent.append((model_name, inputs[0].name(),
+                          list(inputs[0].shape())))
+        callback(None, None)  # без детекций: as_numpy не дёргается
+
+
+def test_submit_async_jpeg_sends_jpeg_input(monkeypatch):
+    """jpeg-режим: вход называется «jpeg», форма [1, N] (batch-мер обязателен
+    при max_batch_size>1), модель — ансамбль yolo_jpeg."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "triton_jpeg_pad", 0)
+    client = FakeAsyncClient()
+    det = TritonDetector(url="fake:8001", client=client, jpeg_intake=True)
+    jb = bytes(range(256)) * 40
+    det.submit_async(1, det.prepare_jpeg(jb, 1280, 720), frame_index=0)
+    model, name, shape = client.sent[0]
+    assert model == "yolo_jpeg"
+    assert name == "jpeg"
+    assert shape == [1, len(jb)]
+
+
+def test_submit_async_cv2_sends_images_input():
+    """cv2-режим (по умолчанию): вход «images» [1,3,640,640], модель —
+    yolo_detector. Регрессия на то, что jpeg-ветка не тронула старый путь."""
+    client = FakeAsyncClient()
+    det = TritonDetector(url="fake:8001", client=client)
+    tensor, geom = det.prepare(_frame())
+    det.submit_async(1, (tensor, geom), frame_index=0)
+    model, name, shape = client.sent[0]
+    assert model == "yolo_detector"
+    assert name == "images"
+    assert shape == [1, 3, INPUT_SIZE, INPUT_SIZE]

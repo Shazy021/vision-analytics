@@ -33,14 +33,24 @@ def _jpeg() -> bytes:
 
 
 def _msg(partition: int, offset: int, jpeg_bytes: bytes, stream_id: int = 7,
-         frame_index: int | None = None):
-    """Фейковое Kafka-сообщение с реальным полезным грузом."""
-    payload = pack({
+         frame_index: int | None = None,
+         width: int | None = None, height: int | None = None):
+    """Фейковое Kafka-сообщение с реальным полезным грузом.
+
+    width/height — поля jpeg-intake (producer кладёт размеры кадра); None —
+    старый формат меты без них.
+    """
+    meta = {
         "frame_index": offset if frame_index is None else frame_index,
         "source": "test",
         "stream_id": stream_id,
         "captured_at": "2026-10-30T12:00:00+00:00",
-    }, jpeg_bytes)
+    }
+    if width is not None:
+        meta["width"] = width
+    if height is not None:
+        meta["height"] = height
+    payload = pack(meta, jpeg_bytes)
     m = MagicMock()
     m.partition.return_value = partition
     m.offset.return_value = offset
@@ -126,6 +136,8 @@ class FakeAsyncDetector:
     """
 
     supports_async = True
+    # Режим cv2-подготовки по умолчанию; jpeg-тесты ставят True.
+    jpeg_intake = False
 
     def __init__(self, latency: float = 0.01, sync: bool = False):
         self.latency = latency
@@ -141,6 +153,9 @@ class FakeAsyncDetector:
 
     def prepare(self, frame):
         return ("tensor", frame)
+
+    def prepare_jpeg(self, jpeg, width, height):
+        return ("jpeg", jpeg, width, height)
 
     def submit_async(self, corr, prepared, frame_index=0, timestamp=0.0, conf=0.25):
         assert isinstance(corr, int), "corr обязан приходить от потребителя"
@@ -188,7 +203,7 @@ def consumer(monkeypatch):
     monkeypatch.setattr(yf, "Producer", lambda cfg: fp)
     det = FakeAsyncDetector()
     monkeypatch.setattr("app.processing.triton_detector.TritonDetector",
-                        lambda channels=None: det)
+                        lambda channels=None, jpeg_intake=False: det)
 
     c = yf.YOLOConsumer(io_workers=2, window=4, channels=2)
     c.fc, c.fp, c.det = fc, fp, det
@@ -518,6 +533,27 @@ class TestAsyncStream:
         _meta_out, (_tensor, frame) = c._prepare(
             _msg(0, 0, buf.tobytes(), frame_index=0))
         assert frame.shape[:2] == (1080, 1920)
+
+    def test_prepare_jpeg_passes_bytes_through(self, consumer):
+        """jpeg-режим: байты уходят в детектор как есть, кадр НЕ декодируется;
+        размеры берутся из меты (обратный ход боксов считает детектор)."""
+        c = consumer
+        c.det.jpeg_intake = True
+        jb = _jpeg()
+        _meta_out, payload = c._prepare(
+            _msg(0, 0, jb, frame_index=0, width=1280, height=720))
+        assert payload[0] == "jpeg"
+        assert payload[1] == jb
+        assert (payload[2], payload[3]) == (1280, 720)
+
+    def test_prepare_jpeg_requires_dims(self, consumer):
+        """jpeg-режим без width/height в мете (старый producer) — ядовитое
+        сообщение, а НЕ тихий откат в cv2-декод: декод здесь — то, от чего
+        режим уходил."""
+        c = consumer
+        c.det.jpeg_intake = True
+        with pytest.raises(ValueError):
+            c._prepare(_msg(0, 0, _jpeg(), frame_index=0))
 
     def test_idle_dispatcher_does_not_busy_spin(self, consumer):
         """Без кадров в полёте диспетчер обязан СПАТЬ в очереди результатов.

@@ -78,6 +78,23 @@ class _FrameLike:
     timestamp: float = 0.0
 
 
+def letterbox_geom(width: int, height: int):
+    """Геометрия letterbox 640 (pad_x, pad_y, scale, orig_h, orig_w) из одних
+    размеров — без единого пикселя.
+
+    Формула — слово в слово та, что строит холст в TritonDetector._preprocess
+    (и платформенный letterbox вообще): scale = min(640/w, 640/h), размеры
+    усечения int(), пад — floor в центр. Она же описывает forward-ход DALI
+    ансамбля yolo_jpeg (resize not_larger + центрирование fn.crop): сверено
+    пиксель-диффом (контент ровно строки 140..499 на 720p) и дрейфом детекций
+    (IoU 0.962 @ q80). JPEG-intake считает из неё обратный ход боксов, не
+    декодируя кадр.
+    """
+    scale = min(INPUT_SIZE / width, INPUT_SIZE / height)
+    nw, nh = int(width * scale), int(height * scale)
+    return (INPUT_SIZE - nw) // 2, (INPUT_SIZE - nh) // 2, scale, height, width
+
+
 class TritonDetector:
     """Клиент Triton: синхронный контракт detect()/detect_batch() для видео
     + асинхронный поток кадров (prepare/submit_async/next_result) для
@@ -87,9 +104,21 @@ class TritonDetector:
     """
 
     def __init__(self, url: str | None = None, model_name: str | None = None,
-                 client=None, channels: int | None = None):
+                 client=None, channels: int | None = None,
+                 jpeg_intake: bool | None = None):
         self.url = url or settings.triton_url
-        self.model_name = model_name or settings.triton_model_name
+        # jpeg_intake: стримовый путь шлёт JPEG-байты в ансамбль yolo_jpeg
+        # (предобработка живёт в DALI на GPU). Дефолт — cv2-режим, НЕ из
+        # settings: видео-трасса (processor.py) конструируется без аргументов
+        # и обязана оставаться на yolo_detector даже когда TRITON_JPEG_INTAKE
+        # стоит в .env. Стримовый консьюмер читает settings и передаёт явно.
+        self.jpeg_intake = False if jpeg_intake is None else jpeg_intake
+        if model_name is not None:
+            self.model_name = model_name
+        else:
+            self.model_name = (settings.triton_jpeg_model_name
+                               if self.jpeg_intake
+                               else settings.triton_model_name)
 
         if client is not None:
             # Заглушка для тестов: один канал.
@@ -179,6 +208,27 @@ class TritonDetector:
         """
         return self._preprocess(frame)
 
+    def prepare_jpeg(self, jpeg: bytes, width: int, height: int):
+        """JPEG-intake: «подготовка» кадра без единого пикселя.
+
+        Возвращает (jpeg, geom) — та же форма контракта, что у prepare(), но
+        вместо tensor сырые байты, а geom считается из размеров (см.
+        letterbox_geom). Предобработку делает DALI внутри ансамбля yolo_jpeg,
+        поэтому decode-воркеру остаётся только распаковать конверт.
+
+        TRITON_JPEG_PAD: длина байтов округляется вверх до кратного бакета —
+        динамический батчинг склеивает только запросы одинаковой формы, без
+        выравнивания dali_letterbox идёт батчем 1. Нули после конца JPEG
+        декодер не читает. Обоснование бакета и замеры — в triton_jpeg_pad
+        (app/core/config.py).
+        """
+        bucket = settings.triton_jpeg_pad
+        if bucket:
+            aligned = -(-len(jpeg) // bucket) * bucket
+            if aligned > len(jpeg):
+                jpeg = jpeg + bytes(aligned - len(jpeg))
+        return jpeg, letterbox_geom(width, height)
+
     def submit_async(self, corr: int, prepared, frame_index: int = 0,
                      timestamp: float = 0.0, conf: float = 0.25) -> None:
         """Один подготовленный кадр → async_infer, мгновенный возврат.
@@ -199,10 +249,19 @@ class TritonDetector:
 
         import tritonclient.grpc as grpcclient
 
-        tensor, geom = prepared
-        batched = tensor[np.newaxis, ...]
-        inp = grpcclient.InferInput("images", list(batched.shape), INPUT_DTYPE)
-        inp.set_data_from_numpy(batched)
+        payload, geom = prepared
+        if self.jpeg_intake:
+            # Вход ансамбля — «jpeg»: одна строка байт [1, N] (batch-мер
+            # обязателен при max_batch_size>1, иначе Triton требует
+            # batch-size <= max). ~100 КБ вместо 1.23 МБ tensor-запроса.
+            arr = np.frombuffer(payload, dtype=np.uint8)[np.newaxis]
+            inp = grpcclient.InferInput("jpeg", list(arr.shape), INPUT_DTYPE)
+            inp.set_data_from_numpy(arr)
+        else:
+            batched = payload[np.newaxis, ...]
+            inp = grpcclient.InferInput("images", list(batched.shape),
+                                        INPUT_DTYPE)
+            inp.set_data_from_numpy(batched)
         requested = [grpcclient.InferRequestedOutput(n) for n in
                      ("num_detections", "boxes", "scores", "classes")]
 
@@ -257,11 +316,10 @@ class TritonDetector:
         INTER_LINEAR вместо INTER_AREA: при 1080p->640 на детекции разницы
         нет, а на большом коэффициенте убавки INTER_AREA заметно дороже.
         """
-        h, w = frame.shape[:2]
-        scale = min(INPUT_SIZE / w, INPUT_SIZE / h)
+        pad_x, pad_y, scale, h, w = letterbox_geom(
+            frame.shape[1], frame.shape[0])
         nw, nh = int(w * scale), int(h * scale)
 
-        pad_x, pad_y = (INPUT_SIZE - nw) // 2, (INPUT_SIZE - nh) // 2
         canvas = np.full((INPUT_SIZE, INPUT_SIZE, 3), 114, dtype=np.uint8)
         cv2.resize(frame, (nw, nh),
                    dst=canvas[pad_y:pad_y + nh, pad_x:pad_x + nw],

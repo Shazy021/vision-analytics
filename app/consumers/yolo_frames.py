@@ -11,10 +11,11 @@
 
   main (поток run)      Забирает сообщения из Kafka и раздаёт на декод.
                         Сам ничего тяжёлого не делает.
-  decode (пул)          Превращает JPEG в тензор: imdecode СРАЗУ вполнакала
-                        (лишние пиксели не нужны — всё равно в 640-холст) +
-                        letterbox. cv2 на время работы отпускает GIL, поэтому
-                        потоки реально параллельны.
+  decode (пул)          Готовит кадр к отправке. В cv2-режиме: imdecode +
+                        letterbox (cv2 отпускает GIL — потоки параллельны).
+                        В jpeg-режиме (TRITON_JPEG_INTAKE) пикселей не
+                        касается вовсе: байты идут в DALI-ансамбль yolo_jpeg
+                        как есть, стадия сводится к распаковке конверта.
   send (N потоков)      Каждый кадр сразу улетает отдельным async-запросом по
                         своему gRPC-каналу. Один поток отправки — потолок ~110
                         req/s (сериализация 4.9 МБ ~9 мс), поэтому их несколько:
@@ -135,7 +136,11 @@ class YOLOConsumer:
         # Параметры: аргументы (тесты) > settings (env) > дефолты.
         self.window = window or settings.yolo_infer_window
         self.channels = max(1, channels or settings.triton_channels)
-        self.detector = TritonDetector(channels=self.channels)
+        # jpeg_intake: предобработка (декод JPEG, resize, letterbox) живёт в
+        # DALI-ансамбле yolo_jpeg на GPU Triton'а; консьюмер шлёт байты как
+        # есть. Ставится через TRITON_JPEG_INTAKE (см. config.py).
+        self.detector = TritonDetector(channels=self.channels,
+                                       jpeg_intake=settings.triton_jpeg_intake)
 
         workers = io_workers or settings.yolo_io_workers
         self.pool = ThreadPoolExecutor(
@@ -307,7 +312,14 @@ class YOLOConsumer:
     # ------------------------------------------------------------------
 
     def _prepare(self, msg):
-        """Разобрать конверт, декодировать кадр и сделать letterbox (в потоке пула).
+        """Разобрать конверт и подготовить кадр к отправке (в потоке пула).
+
+        Два режима (settings.triton_jpeg_intake):
+          cv2  — декодировать кадр и сделать letterbox (дорогая CPU-часть);
+          jpeg — байты уходят в Triton как есть, ВСЁ чтение пикселей делает
+                 DALI внутри ансамбля yolo_jpeg (декод, resize, letterbox);
+                 геометрия обратного хода считается из width/height в мете,
+                 кадр здесь не декодируется ни при каких условиях.
 
         Декодируем ПОЛНЫМ размером: стримы приходят в разном разрешении,
         и урезанный декод (IMREAD_REDUCED_COLOR_2) одинаково режет детали
@@ -326,14 +338,6 @@ class YOLOConsumer:
 
         data, frame_bytes = unpack(msg.value())
 
-        # Декодируем кадр
-        started = time.perf_counter()
-        buf = np.frombuffer(frame_bytes, dtype=np.uint8)
-        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        frame_decode_duration_seconds.observe(time.perf_counter() - started)
-        if frame is None:
-            raise ValueError("кадр не декодировался (битый JPEG?)")
-
         meta = {
             "frame_index": data["frame_index"],
             "stream_id": data.get("stream_id"),
@@ -345,6 +349,27 @@ class YOLOConsumer:
             # Сырой JPEG пригодится для MinIO — сохраняем без перекодирования.
             "frame_bytes": frame_bytes,
         }
+
+        if self.detector.jpeg_intake:
+            # Битый JPEG здесь не поймается (пикселей не касаемся) —
+            # разберётся DALI на сервере, ошибка приедет через _handle_result.
+            w, h = data.get("width"), data.get("height")
+            if not w or not h:
+                # Сообщения от producer'а до появления полей width/height
+                # (окно — retention топика после апгрейда). Травим, а не
+                # декодируем ради размеров: декод в этом режиме — то, от
+                # чего мы уходили.
+                raise ValueError("нет width/height в мете (старый producer?)")
+            return meta, self.detector.prepare_jpeg(frame_bytes, w, h)
+
+        # Декодируем кадр
+        started = time.perf_counter()
+        buf = np.frombuffer(frame_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        frame_decode_duration_seconds.observe(time.perf_counter() - started)
+        if frame is None:
+            raise ValueError("кадр не декодировался (битый JPEG?)")
+
         prepared = self.detector.prepare(frame)
         del frame
         return meta, prepared

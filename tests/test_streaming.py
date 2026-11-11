@@ -57,6 +57,9 @@ class TestYOLOConsumer:
 
         c = YOLOConsumer.__new__(YOLOConsumer)
         c.detector = MagicMock()
+        # Режим cv2-подготовки: у голого MagicMock любой атрибут truthy,
+        # а _prepare по detector.jpeg_intake выбирает ветку декода.
+        c.detector.jpeg_intake = False
         c.producer = MagicMock()
         c.consumer = MagicMock()
         # Атрибуты, которые в бою создаёт __init__ (async-конвейер + watermark)

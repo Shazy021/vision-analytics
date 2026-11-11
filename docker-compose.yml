@@ -177,6 +177,12 @@ services:
       tritonserver
       --model-repository=/models
       --model-control-mode=none
+    environment:
+      # DALI mixed-декодер (decoders.image device="mixed") грузит nvimgcodec из
+      # колеса бэкенда; без этого пути nvImageCodec не находит библиотеку и
+      # декодер падает на загрузке модели (nvml error 3). Путь — к колесу DALI
+      # внутри образа бэкенда, проверено на proto-стенде (yolo_jpeg READY).
+      LD_LIBRARY_PATH: /opt/tritonserver/backends/dali/wheel/dali/nvidia/nvimgcodec
     volumes:
       - ./models/triton:/models:ro
     shm_size: 4gb
@@ -205,11 +211,11 @@ services:
       dockerfile: Dockerfile.cpu
     image: vap-cpu:latest
     command: python -m app.consumers.yolo_frames
-    # Две реплики — симметрично с video-consumer
-    # Партиций у raw_frames 6 — на вырост: вернуть replicas: 3 можно без
-    # репартиционирования.
+    # Партиций у raw_frames 6 — по 3 на реплику; замер GIL-потолка (~330 fps
+    # на 2 реплики) показал, что узкое место стрим-пути — python-процесс,
+    # третья реплика поднимает capacity до уровня Triton'а (~430).
     deploy:
-      replicas: 2
+      replicas: 3
     # 10 падений подряд (Triton лёг, сеть легла) — консьюмер сам выходит с
     # кодом 1 (см. MAX_CONSECUTIVE_FAILURES в yolo_frames.py), а супервизор
     # поднимает новый процесс. Без этого консьюмер превращается в зомби,
@@ -229,6 +235,15 @@ services:
       YOLO_INFER_WINDOW: ${YOLO_INFER_WINDOW:-64}
       TRITON_CHANNELS: ${TRITON_CHANNELS:-4}
       YOLO_IO_WORKERS: ${YOLO_IO_WORKERS:-4}
+      # JPEG-intake: консьюмер шлёт JPEG-байты в DALI-ансамбль yolo_jpeg
+      # (предобработка на GPU Triton'а), вместо клиентского imdecode+letterbox.
+      # Включается одним флагом; модели yolo_jpeg + dali_letterbox должны быть
+      # в репозитории Triton (models/triton). Видео-трасса флага не читает.
+      TRITON_JPEG_INTAKE: ${TRITON_JPEG_INTAKE:-false}
+      TRITON_JPEG_MODEL_NAME: ${TRITON_JPEG_MODEL_NAME:-yolo_jpeg}
+      # Выравнивание длины JPEG-запросов: без него динамический батчинг
+      # Triton'а не склеивает кадры разной длины (батч 1) — см. config.py.
+      TRITON_JPEG_PAD: ${TRITON_JPEG_PAD:-0}
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}

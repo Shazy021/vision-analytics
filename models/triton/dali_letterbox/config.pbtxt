@@ -1,0 +1,31 @@
+name: "dali_letterbox"
+backend: "dali"
+max_batch_size: 16
+
+input [
+  {
+    name: "DALI_INPUT_0"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "DALI_OUTPUT_0"
+    data_type: TYPE_UINT8
+    dims: [ 3, 640, 640 ]
+  }
+]
+
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 8 ]
+  max_queue_delay_microseconds: 5000
+}
