@@ -475,6 +475,12 @@ class YOLOConsumer:
                 break
             self._handle_result(corr, payload)
         self._publish_ready()
+        # Яд сдвигает границу (снимает должника), но детекций не порождает,
+        # а _publish_ready при пустом _ready выходит сразу — без этого
+        # коммита watermark догонял бы яд только со следующим успешным
+        # кадром, а на паузе в трафике — никогда. Без изменений коммит
+        # дешёв: _committed-гард возвращает пустой список до всякого Kafka.
+        self._commit_watermarks()
 
     def _handle_result(self, corr: int, payload) -> None:
         with self._pending_lock:
