@@ -132,7 +132,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Triton: кадры/с и средний батч движка",
-      "description": "nv_inference_count — картинки, прогнанные движком; request_success — входящие async-запросы; средний батч = count/exec — НАСКОЛЬКО динамический батчинг реально склеивает наши одиночные запросы в прогоны (1.0 = не склеивает).",
+      "description": "Метрики привязаны к model=\"yolo_detector\" — движку, который реально крутит пиксели. Суммирование по всем моделям враёт при jpeg-intake: ансамбль yolo_jpeg + dali_letterbox + yolo_detector пишут счётчики на ОДИН кадр втрое (240 fps давало 718 req/s). Средний батч = count/exec по движку — НАСКОЛЬКО динамический батчинг склеивает одиночные запросы в прогоны (1.0 = не склеивает). Запросов/с — верхний вход: yolo_jpeg (jpeg-intake), иначе yolo_detector (cv2-путь).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
       "fieldConfig": {
@@ -144,16 +144,16 @@
       },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "expr": "sum(rate(nv_inference_count[1m]))", "legendFormat": "движок, кадров/с" },
-        { "refId": "B", "expr": "sum(rate(nv_inference_request_success[1m]))", "legendFormat": "запросов/с" },
-        { "refId": "C", "expr": "sum(rate(nv_inference_count[1m])) / sum(rate(nv_inference_exec_count[1m]))", "legendFormat": "средний батч" }
+        { "refId": "A", "expr": "sum(rate(nv_inference_count{model=\"yolo_detector\"}[1m]))", "legendFormat": "движок, кадров/с" },
+        { "refId": "B", "expr": "sum(rate(nv_inference_request_success{model=\"yolo_jpeg\"}[1m])) or sum(rate(nv_inference_request_success{model=\"yolo_detector\"}[1m]))", "legendFormat": "запросов/с" },
+        { "refId": "C", "expr": "sum(rate(nv_inference_count{model=\"yolo_detector\"}[1m])) / sum(rate(nv_inference_exec_count{model=\"yolo_detector\"}[1m]))", "legendFormat": "средний батч" }
       ]
     },
     {
       "id": 8,
       "type": "timeseries",
       "title": "Triton: GPU, очередь и время инференса",
-      "description": "nv_gpu_utilization — загружен ли движок под потолок; pending — очередь перед движком (растёт = не успеваем); инференс на кадр = прирост compute_infer / прирост запросов. Очередь+низкий GPU = узкое место НЕ движок (декод/отправка).",
+      "description": "nv_gpu_utilization — загружен ли движок под потолок; pending — очередь перед ДВИЖКОМ (yolo_detector; растёт = не успеваем); инференс на кадр = compute_infer/count по движку (не суммируем по ансамблю — иначе сумма ансамбля (yolo_jpeg+dali_letterbox+yolo_detector) исказит и очередь, и мс/кадр). Очередь+низкий GPU = узкое место НЕ движок (отправка/сеть).",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "fieldConfig": {
@@ -168,8 +168,8 @@
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi" } },
       "targets": [
         { "refId": "A", "expr": "max(nv_gpu_utilization)", "legendFormat": "GPU busy" },
-        { "refId": "B", "expr": "sum(nv_inference_pending_request_count)", "legendFormat": "очередь, запросов" },
-        { "refId": "C", "expr": "1000 * sum(rate(nv_inference_compute_infer_duration_us[1m])) / clamp_min(sum(rate(nv_inference_count[1m])), 0.001)", "legendFormat": "инференс, мс/кадр" }
+        { "refId": "B", "expr": "sum(nv_inference_pending_request_count{model=\"yolo_detector\"})", "legendFormat": "очередь, запросов" },
+        { "refId": "C", "expr": "1000 * sum(rate(nv_inference_compute_infer_duration_us{model=\"yolo_detector\"}[1m])) / clamp_min(sum(rate(nv_inference_count{model=\"yolo_detector\"}[1m])), 0.001)", "legendFormat": "инференс, мс/кадр" }
       ]
     }
   ]
