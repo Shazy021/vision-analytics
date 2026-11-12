@@ -243,7 +243,8 @@ services:
       TRITON_JPEG_MODEL_NAME: ${TRITON_JPEG_MODEL_NAME:-yolo_jpeg}
       # Выравнивание длины JPEG-запросов: без него динамический батчинг
       # Triton'а не склеивает кадры разной длины (батч 1) — см. config.py.
-      TRITON_JPEG_PAD: ${TRITON_JPEG_PAD:-0}
+      # 65536 (64 КБ) — дефолт по бенчу 2026-11-11: 240 → 360 fps.
+      TRITON_JPEG_PAD: ${TRITON_JPEG_PAD:-65536}
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
