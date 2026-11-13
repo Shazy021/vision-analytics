@@ -196,6 +196,7 @@ class TestDetectionConsumer:
                 bbox_y1=200.0,
                 bbox_x2=300.0,
                 bbox_y2=400.0,
+                track_id=None,
             )
             mock_db.add.assert_called_once()
             mock_db.commit.assert_called_once()
@@ -288,6 +289,9 @@ class TestDetectionConsumerBatch:
         c.grace_ms = grace_ms
         c.consumer = MagicMock()
         c._last_orphan_warn = {}
+        # Трекинг выключен: сообщения пишутся напрямую, как до трекинга.
+        c.trackers = None
+        c._track_ids = {}
         return c
 
     def _msg(self, partition: int, offset: int, payload):
@@ -458,6 +462,270 @@ class TestDetectionConsumerBatch:
         started = time.monotonic()
         assert c._collect_batch() == {}
         assert time.monotonic() - started < 0.5
+
+
+# ---- Тесты трекинга в DetectionConsumer ---------------------------------
+
+class _FakeTrackers:
+    """Замена StreamTrackers: отпускает всё сразу, помечая объекты
+    локальными id 1000+i."""
+
+    def __init__(self):
+        self.released = []
+
+    def submit(self, stream_id, frame_index, captured_at, captured_epoch,
+               objects, fps=None):
+        from app.tracking import TrackedFrame
+        for i, o in enumerate(objects):
+            o["track_id"] = 1000 + i
+        frame = TrackedFrame(stream_id=stream_id, frame_index=frame_index,
+                             captured_at=captured_at, captured_epoch=captured_epoch,
+                             objects=objects)
+        self.released.append(frame)
+        return [frame], False
+
+    def evict_idle(self):
+        return []
+
+    @property
+    def active_total(self):
+        return 0
+
+
+class TestDetectionConsumerTracking:
+    """Взаимодействие консьюмера с трекером: track_id в строках, граница
+    Kafka не проезжает удержанный кадр, дубли пишутся без трека."""
+
+    _msg = TestDetectionConsumerBatch._msg
+    _payload = TestDetectionConsumerBatch._payload
+    _stored_offsets = staticmethod(TestDetectionConsumerBatch._stored_offsets)
+
+    def _make_consumer(self, trackers):
+        from app.consumers.detections import DetectionConsumer
+        c = DetectionConsumer.__new__(DetectionConsumer)
+        c.batch_max = 4
+        c.grace_ms = 1
+        c.consumer = MagicMock()
+        c._last_orphan_warn = {}
+        c.trackers = trackers
+        c._track_ids = {}
+        c._stream_fps = {}
+        return c
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_track_id_lands_in_rows(self, mock_session_cls):
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+
+        m = self._msg(0, 0, self._payload(frame_index=10))
+        with patch("app.consumers.detections.frame_written_total"):
+            c._write_batch({0: [m]})
+
+        rows = mock_db.bulk_insert_mappings.call_args.args[1]
+        # Трекер поставил ЛОКАЛЬНЫЙ id 1000, в БД идёт None: отображение
+        # в id строки tracks делает _apply_track_events, а без реального
+        # insert (сессия мок) id нет — строка пишется с NULL, не с мусором.
+        assert rows[0]["track_id"] is None
+        # Граница прошла: кадр отпущен трекером
+        assert self._stored_offsets(c.consumer) == [0]
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_duplicate_written_without_track(self, mock_session_cls):
+        """Redelivery: трекер дубль отбрасывает, но строка в БД уходит
+        (дедуп записей здесь не было и нет), offset двигается."""
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+
+        class _DupTrackers(_FakeTrackers):
+            def submit(self, *a, **k):
+                return [], True
+
+        c = self._make_consumer(_DupTrackers())
+        m = self._msg(0, 5, self._payload(frame_index=10))
+        with patch("app.consumers.detections.frame_written_total"):
+            c._write_batch({0: [m]})
+
+        rows = mock_db.bulk_insert_mappings.call_args.args[1]
+        assert len(rows) == 1 and rows[0]["track_id"] is None
+        assert self._stored_offsets(c.consumer) == [5]
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_apply_track_events_opens_and_maps(self, mock_session_cls):
+        """opened-событие: строка Track вставляется, локальный id трекера
+        отображается в id строки и проставляется объектам кадра."""
+        from app.tracking import TrackedFrame, TrackEvent
+
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+
+        frame = TrackedFrame(
+            stream_id=1, frame_index=100, captured_at=None, captured_epoch=None,
+            objects=[{"class": "person", "confidence": 0.9,
+                      "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0},
+                      "track_id": 7}],
+            opened=[TrackEvent("opened", 7, "person", (1.0, 2.0, 3.0, 4.0))],
+            touched=[(7, "person", (1.0, 2.0, 3.0, 4.0))],
+        )
+        with patch("app.consumers.detections.Track") as TrackCls, \
+             patch("app.consumers.detections.track_events_total"):
+            c._apply_track_events([frame])
+
+        row = TrackCls.return_value
+        mock_db.add_all.assert_called_once_with([row])
+        assert c._track_ids[(1, 7)] is row.id
+        assert frame.objects[0]["track_id"] is row.id
+        mock_db.commit.assert_called_once()
+        # Тронутый в кадре рождения трек не обновляется вторично
+        mock_db.query.assert_not_called()
+        mock_db.execute.assert_not_called()
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_apply_track_events_failure_clears_ids(self, mock_session_cls):
+        """Транзакция треков упала — детекции пойдут без track_id, и
+        битые отображения не переживут батч."""
+        from sqlalchemy.exc import IntegrityError
+
+        from app.tracking import TrackedFrame, TrackEvent
+
+        mock_db = MagicMock()
+        mock_db.commit.side_effect = IntegrityError("s", {}, Exception("fk"))
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+
+        frame = TrackedFrame(
+            stream_id=1, frame_index=100, captured_at=None, captured_epoch=None,
+            objects=[{"class": "person", "confidence": 0.9,
+                      "bbox": {"x1": 1.0, "y1": 2.0, "x2": 3.0, "y2": 4.0},
+                      "track_id": 7}],
+            opened=[TrackEvent("opened", 7, "person", (1.0, 2.0, 3.0, 4.0))],
+        )
+        with patch("app.consumers.detections.Track"), \
+             patch("app.consumers.detections.track_events_total"):
+            c._apply_track_events([frame])
+
+        assert (1, 7) not in c._track_ids
+        assert frame.objects[0]["track_id"] is None
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_opened_row_counts_hits_at_confirmation(self, mock_session_cls):
+        """opened приезжает на подтверждении: num_frames строки = hits из
+        события, а не 1 — подтверждённый трек уже жил min_hits кадров."""
+        from app.tracking import TrackedFrame, TrackEvent
+
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+
+        frame = TrackedFrame(
+            stream_id=1, frame_index=101, captured_at=None, captured_epoch=None,
+            objects=[],
+            opened=[TrackEvent("opened", 7, "person", (1.0, 2.0, 3.0, 4.0), hits=2)],
+        )
+        with patch("app.consumers.detections.Track") as TrackCls, \
+             patch("app.consumers.detections.track_events_total"):
+            c._apply_track_events([frame])
+
+        # num_frames уходит в конструктор Track(...), а не присваивается
+        # на готовом объекте — проверяем kwargs вызова.
+        assert TrackCls.call_args.kwargs["num_frames"] == 2
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_close_keeps_last_seen(self, mock_session_cls):
+        """closed не перебивает last_seen_at/last_frame_index: закрытие
+        приезжает позже реального исчезновения (evict_idle — на минуты),
+        время последней видимости держит touched."""
+        from sqlalchemy.dialects import postgresql
+
+        from app.tracking import TrackedFrame, TrackEvent
+
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+        c._track_ids[(1, 7)] = 55
+
+        frame = TrackedFrame(
+            stream_id=1, frame_index=200, captured_at=None, captured_epoch=None,
+            objects=[],
+            closed=[TrackEvent("closed", 7, "person", (1.0, 2.0, 3.0, 4.0))],
+        )
+        with patch("app.consumers.detections.track_events_total"):
+            c._apply_track_events([frame])
+
+        assert mock_db.execute.call_count == 1
+        sql = str(mock_db.execute.call_args.args[0]
+                  .compile(dialect=postgresql.dialect()))
+        assert "closed_at" in sql
+        stale_keys = {"last_seen_at", "last_frame_index"}
+        assert not stale_keys & set(sql)
+        assert (1, 7) not in c._track_ids
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_touched_tracks_update_in_one_statement(self, mock_session_cls):
+        """Пакетный UPDATE затронутых треков: два трека и несколько касаний
+        одного за батч — ОДИН запрос, num_frames растёт на число касаний
+        (семантика прежняя: серия поштучных UPDATE, ужатая в VALUES)."""
+        from sqlalchemy.dialects import postgresql
+
+        from app.tracking import TrackedFrame
+
+        mock_db = MagicMock()
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+        c._track_ids[(1, 7)] = 55
+        c._track_ids[(1, 8)] = 56
+
+        def frame(fi):
+            return TrackedFrame(
+                stream_id=1, frame_index=fi, captured_at=None, captured_epoch=None,
+                objects=[],
+                touched=[(7, "person", (1.5, 2.5, 3.5, 4.5)),
+                         (8, "person", (5.5, 6.5, 7.5, 8.5))],
+            )
+
+        with patch("app.consumers.detections.track_events_total"):
+            c._apply_track_events([frame(10), frame(11)])
+
+        assert mock_db.execute.call_count == 1
+        compiled = mock_db.execute.call_args.args[0].compile(
+            dialect=postgresql.dialect())
+        sql = str(compiled)
+        assert "UPDATE tracks" in sql
+        assert "num_frames" in sql and "v.hits" in sql
+        params = list(compiled.params.values())
+        assert 55 in params and 56 in params
+        # hits=2 на каждый трек (два кадра батча тронули оба)
+        assert params.count(2) == 2
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_close_stale_tracks(self, mock_session_cls):
+        """Старт: «active» молчавших стримов закрываются restart-причиной.
+        Живые стримы при этом не трогает — их сирот закроет _fps_of."""
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.update.return_value = 3
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+        c._close_stale_tracks()
+        mock_db.commit.assert_called_once()
+
+    @patch("app.consumers.detections.SessionLocal")
+    def test_fps_of_first_sight_closes_stream_orphans(self, mock_session_cls):
+        """Первый sighting стрима: его active-треки прежнего владельца
+        закрываются (мультиреплика: только своего стрима, не все подряд);
+        второй sighting — уже из кэша, без БД."""
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.scalar.return_value = 15
+        mock_db.query.return_value.filter.return_value.update.return_value = 2
+        mock_session_cls.return_value = mock_db
+        c = self._make_consumer(_FakeTrackers())
+
+        assert c._fps_of(7) == 15
+        mock_db.query.return_value.filter.return_value.update.assert_called_once()
+        mock_db.commit.assert_called_once()
+
+        assert c._fps_of(7) == 15  # кэш: сессия не открывается заново
+        mock_session_cls.assert_called_once()
 
 
 # ---- Тесты топиков ----

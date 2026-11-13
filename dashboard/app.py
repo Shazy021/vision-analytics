@@ -304,13 +304,34 @@ def get_stream_detections(stream_id, limit=100, frame_index=None):
         return []
 
 
+@st.cache_data(ttl=10)
+def get_stream_tracks(stream_id, status=None, limit=200):
+    try:
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        r = requests.get(
+            f"{API_URL}/api/streams/{stream_id}/tracks",
+            params=params,
+            timeout=5,
+        )
+        return r.json() if r.status_code == 200 else []
+    except Exception:
+        return []
+
+
 # ---- Превью-эндпоинты: НЕ кэшируем (хотим свежий кадр каждый запрос) ----
 
+@st.cache_data(ttl=300)
 def get_video_all_detections(video_id, limit=100000):
     """
     ВСЕ детекции видео для синхронного плеера: JSON инжектится прямо в
     JS-компонент, и клиент рисует боксы по currentTime без единого
     запроса к серверу на кадр.
+
+    Кеш обязателен: функция вызывается при каждом полном реране страницы
+    (любой клик по виджетам), а для завершённого видео детекции неизменяемы
+    — перекачивать мегабайты JSON ради перерисовки той же картинки нельзя.
     """
     try:
         r = requests.get(
@@ -324,12 +345,29 @@ def get_video_all_detections(video_id, limit=100000):
 
 
 def get_video_data(video_id):
-    """Полные данные видео: duration, fps, status, video_url (presigned)."""
+    """Полные данные видео: duration, fps, status, video_url (presigned).
+
+    БЕЗ кеша: этим путём идёт video_progress_fragment, которому нужен
+    свежий status/processed_frames каждые 2 секунды.
+    """
     try:
         r = requests.get(f"{API_URL}/api/videos/{video_id}", timeout=5)
         return r.json() if r.status_code == 200 else None
     except Exception:
         return None
+
+
+@st.cache_data(ttl=300)
+def get_video_preview(video_id):
+    """Данные видео для плеера — кешем.
+
+    Плеер живёт в stc.html: если presigned URL меняется между реранами,
+    меняется HTML, iframe пересоздаётся — и смотрение обрывается на нуле
+    после любого клика по виджетам страницы. Кеш держит URL стабильным
+    (подпись живёт час, кеш — 5 минут), поэтому при неизменном содержимом
+    Streamlit не перемонтирует iframe.
+    """
+    return get_video_data(video_id)
 
 
 @st.cache_data(ttl=300)
@@ -443,12 +481,22 @@ CLASS_COLORS = {
 DEFAULT_COLOR = "#8B93A1"
 
 
+def track_color(track_id):
+    """Стабильный цвет трека: один track_id — один цвет между рендерами."""
+    return CHART_PALETTE[int(track_id) % len(CHART_PALETTE)]
+
+
 def render_frame_with_boxes_html(image_bytes, detections):
     """
     Наложить боксы детекций на картинку через CSS-overlay.
 
     Боксы позиционируются в процентах от размеров изображения, поэтому
     точно садятся на объекты при любой ширине контейнера.
+
+    Детекции с track_id (стримовая трасса с ByteTrack) красятся по треку,
+    а не по классу: глаз следит за объектом, а цвет по track_id делает это
+    буквально — один и тот же человек остаётся одним цветом от кадра к
+    кадру, даже когда класс детектор то теряет, то переопределяет.
     """
     if not image_bytes:
         return None
@@ -481,8 +529,13 @@ def render_frame_with_boxes_html(image_bytes, detections):
         x1, y1, x2, y2 = bbox
         cls = det.get("class_name", "?")
         conf = det.get("confidence", 0.0)
-        color = CLASS_COLORS.get(cls, DEFAULT_COLOR)
-        label = f"{cls} {conf:.0%}"
+        tid = det.get("track_id")
+        if tid:
+            color = track_color(tid)
+            label = f"#{tid} {cls} {conf:.0%}"
+        else:
+            color = CLASS_COLORS.get(cls, DEFAULT_COLOR)
+            label = f"{cls} {conf:.0%}"
 
         boxes_html_parts.append(
             box_template.format(
@@ -554,6 +607,21 @@ def crop_object(img_bytes, bbox, pad=CROP_PAD):
         return None
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def crop_object_cached(stream_id, frame_index, bbox, pad=CROP_PAD):
+    """Кроп по (стрим, кадр, бокс) — кешем.
+
+    Галерея пересобирается на каждом полле фрагмента (каждые 1–10 сек),
+    а данные за полл обычно не меняются: без кеша это до 24 циклов
+    PIL-decode/crop/JPEG-энкода на ровном месте. Байты кадра тянем через
+    закешированный fetch — MinIO тоже трогается один раз на кадр.
+    """
+    img_bytes = fetch_frame_bytes_by_index(stream_id, frame_index)
+    if not img_bytes:
+        return None
+    return crop_object(img_bytes, list(bbox), pad)
+
+
 def detections_gallery_html(stream_id, detections, cards=12):
     """Сетка карточек: дедуп по frame_index, каждый объект — отдельный кроп.
 
@@ -568,15 +636,22 @@ def detections_gallery_html(stream_id, detections, cards=12):
 
     cards_html = []
     for fi, dets in list(by_frame.items())[:cards]:
-        img_bytes = fetch_frame_bytes_by_index(stream_id, fi)
-        if not img_bytes:
-            continue
         for d in dets:
-            b64 = crop_object(img_bytes, d["bbox"])
+            b64 = crop_object_cached(stream_id, fi, tuple(d["bbox"]))
             if not b64:
                 continue
             color = CLASS_COLORS.get(d["class_name"], DEFAULT_COLOR)
             ts = d["detected_at"][11:19] if len(d["detected_at"]) >= 19 else ""
+            tid = d.get("track_id")
+            # Чип трека поверх кропа: тот же цвет, что у бокса на превью,
+            # — карточка и кадр опознаются одним взглядом.
+            track_chip = (
+                f'<span style="position:absolute;top:6px;left:6px;'
+                f'background:{track_color(tid)};color:#fff;font-size:11px;'
+                'font-weight:700;padding:2px 7px;border-radius:10px;'
+                f'line-height:1.4;">#{tid}</span>'
+                if tid else ""
+            )
             # Только inline-стили: st.markdown вырезает class у пользовательского
             # HTML (тот же приём, что в render_frame_with_boxes_html).
             cards_html.append(
@@ -586,6 +661,7 @@ def detections_gallery_html(stream_id, detections, cards=12):
                 f'border-bottom:2px solid {color};">'
                 f'<img src="data:image/jpeg;base64,{b64}" alt="" '
                 'style="width:100%;aspect-ratio:4/3;object-fit:cover;display:block;"/>'
+                + track_chip +
                 f'<span style="position:absolute;bottom:6px;right:6px;'
                 f'background:{color};color:#fff;font-size:11px;font-weight:700;'
                 'padding:2px 7px;border-radius:10px;line-height:1.4;">'
@@ -610,6 +686,72 @@ def detections_gallery_html(stream_id, detections, cards=12):
         'grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;">'
         + "".join(cards_html)
         + "</div>"
+    )
+
+
+# ============================================================
+# ТРЕКИ — таблица жизненного цикла отслеженных объектов
+# ============================================================
+TRACKS_TABLE_MAX_ROWS = 15
+
+
+def fmt_hms(ts):
+    """'2026-11-12 14:33:03.123456' -> '14:33:03' (наивный UTC из API)."""
+    return ts[11:19] if ts and len(ts) >= 19 else (ts or "—")
+
+
+def fmt_dur(sec):
+    if sec is None:
+        return "—"
+    sec = int(sec)
+    return f"{sec}с" if sec < 60 else f"{sec // 60}м {sec % 60:02d}с"
+
+
+def track_status_badge(status, reason):
+    if status == "active":
+        fg, bg, label = "#1A7F37", "#DAFBE1", "на сцене"
+    else:
+        fg, bg = "#57606A", "#E7EBEF"
+        label = f"закрыт · {reason}" if reason else "закрыт"
+    return (
+        f'<span style="background:{bg};color:{fg};padding:2px 8px;'
+        'border-radius:20px;font-size:11px;font-weight:600;'
+        f'white-space:nowrap;">{label}</span>'
+    )
+
+
+def tracks_table_html(tracks):
+    """Компактная таблица треков: свежайшие сверху (API уже отсортировал)."""
+    head = ("Трек", "Статус", "Шла", "Кадры", "Появился", "Виден был")
+    th = "".join(
+        f'<th style="text-align:left;padding:6px 10px;color:{MUTED};'
+        'font-size:11px;text-transform:uppercase;letter-spacing:0.5px;'
+        f'border-bottom:1px solid {BORDER};white-space:nowrap;">{h}</th>'
+        for h in head
+    )
+    td = 'style="padding:6px 10px;border-bottom:1px solid %s;white-space:nowrap;"' % BORDER
+    rows = []
+    for t in tracks[:TRACKS_TABLE_MAX_ROWS]:
+        color = track_color(t["id"])
+        chip = (
+            f'<span style="background:{color};color:#fff;font-weight:700;'
+            f'padding:2px 8px;border-radius:10px;">#{t["id"]}</span>'
+        )
+        rows.append(
+            "<tr>"
+            f'<td {td}>{chip} <b style="margin-left:6px;">{t["class_name"]}</b></td>'
+            f'<td {td}>{track_status_badge(t["status"], t.get("closed_reason"))}</td>'
+            f'<td {td}>{fmt_dur(t.get("duration_sec"))}</td>'
+            f'<td {td}>{t["num_frames"]}</td>'
+            f'<td {td}>{fmt_hms(t["first_seen_at"])}</td>'
+            f'<td {td}>{fmt_hms(t["last_seen_at"])}</td>'
+            "</tr>"
+        )
+    return (
+        f'<div style="background:{CARD};border:1px solid {BORDER};'
+        'border-radius:12px;overflow-x:auto;">'
+        '<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+        f"<thead><tr>{th}</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
     )
 
 
@@ -934,7 +1076,7 @@ if page == "📹 Видео":
         if duration <= 0:
             st.error("Длительность видео неизвестна — превью недоступно.")
         else:
-            video_data = get_video_data(selected_video_id)
+            video_data = get_video_preview(selected_video_id)
             video_url = (video_data or {}).get("video_url")
             if not video_url:
                 st.warning(
@@ -1246,12 +1388,16 @@ elif page == "📡 Стримы":
                             "Запустите стрим и подождите.")
                 return
 
-            frame_url = latest["frame_url"]
             frame_index = latest["frame_index"]
             det_count_latest = latest["detections_count"]
 
-            img_bytes = fetch_image_bytes(frame_url)
+            # Кадр через закешированный загрузчик, а не по presigned URL из
+            # latest-frame: при неизменном frame_index (нет новых детекций)
+            # байты берутся из кеша, и полле не гоняет ~200KB через сеть
+            # каждые N секунд.
+            img_bytes = fetch_frame_bytes_by_index(prev_stream_id, frame_index)
             dets = get_stream_detections(prev_stream_id, frame_index=frame_index)
+            n_tracks = len({d["track_id"] for d in dets if d.get("track_id")})
 
             col_raw, col_boxed = st.columns(2)
 
@@ -1267,7 +1413,9 @@ elif page == "📡 Стримы":
                     st.error("Не удалось скачать кадр из MinIO.")
                 st.caption(
                     f"📷 Frame #{frame_index} | 🎯 Детекций на кадре: "
-                    f"**{det_count_latest}** | polled at {time.strftime('%H:%M:%S')}"
+                    f"**{det_count_latest}**"
+                    + (f" | 🧭 Треков: **{n_tracks}**" if n_tracks else "")
+                    + f" | polled at {time.strftime('%H:%M:%S')}"
                 )
 
             with col_boxed:
@@ -1335,6 +1483,40 @@ elif page == "📡 Стримы":
                     st.plotly_chart(dark_fig(fig, 320), use_container_width=True)
                 else:
                     empty_state("⏱", "Нет активности", "За последние 10 минут детекций не было.")
+
+            # ---- Треки ----
+            st.markdown(section_header("🧭 Треки"), unsafe_allow_html=True)
+
+            # Треки привязаны к конкретному стриму; на «Все стримы» берём
+            # первый стрим с детекциями — тот же приём, что у галереи ниже.
+            tracks_stream_id = sel_stream_id
+            if tracks_stream_id is None:
+                for s in streams:
+                    if s["detections_count"] > 0:
+                        tracks_stream_id = s["id"]
+                        break
+
+            tracks = get_stream_tracks(tracks_stream_id) if tracks_stream_id else []
+            if tracks:
+                n_active = sum(1 for t in tracks if t["status"] == "active")
+                avg_dur = statistics.mean(t["duration_sec"] for t in tracks)
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Сейчас на сцене", n_active)
+                m2.metric("Треков в выборке", len(tracks))
+                m3.metric("Средняя длительность", fmt_dur(avg_dur))
+                st.markdown(tracks_table_html(tracks), unsafe_allow_html=True)
+                if len(tracks) > TRACKS_TABLE_MAX_ROWS:
+                    st.caption(
+                        f"Показаны последние {TRACKS_TABLE_MAX_ROWS} из {len(tracks)} "
+                        "треков (сортировка по последней видимости)."
+                    )
+            else:
+                empty_state(
+                    "🧭", "Треков пока нет",
+                    "Трек рождается, когда ByteTrack подтверждает объект "
+                    "несколько кадров подряд. Включён трекинг (TRACKING_ENABLED) "
+                    "и стрим гоняет детекции — треки появятся здесь.",
+                )
 
             st.markdown(section_header("📋 Галерея детекций"), unsafe_allow_html=True)
 

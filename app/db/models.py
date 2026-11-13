@@ -94,12 +94,64 @@ class StreamDetection(_DetectionMixin, Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     stream_id = Column(Integer, ForeignKey("streams.id", ondelete="CASCADE"), nullable=False)
+    # Трек, к которому относится детекция (трекинг v1, см. app/tracking).
+    # NULL у детекций до включения трекинга и на видео-трассе.
+    track_id = Column(Integer, ForeignKey("tracks.id", ondelete="SET NULL"), nullable=True)
 
     stream = relationship("Stream", back_populates="detections")
 
     __table_args__ = (
         Index("idx_stream_detections_stream_class", "stream_id", "class_name"),
         Index("idx_stream_detections_stream_at", "stream_id", "detected_at"),
+    )
+
+
+class Track(Base):
+    """Жизненный цикл отслеженного объекта стрима (трекинг v1).
+
+    Строка открывается, когда ByteTrack подтверждает новый трек, обновляется
+    на каждом кадре с этим объектом и закрывается при потере (объект не
+    подтверждался дольше track_max_age_sec секунд, отсчитанных в кадрах
+    подачи этого стрима) или при рестарте
+    консьюмера (состояние трекеров
+    живёт в памяти и рестарт не переживает). Это фундамент для будущих
+    зон/dwell-time: «кто, где и сколько пробыл» читается отсюда, без
+    перегруппировки сырых детекций.
+
+    id здесь же внешний ключ для stream_detections.track_id — детекции
+    переживают закрытие трека (ON DELETE SET NULL).
+    """
+    __tablename__ = "tracks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stream_id = Column(Integer, ForeignKey("streams.id", ondelete="CASCADE"), nullable=False)
+    class_name = Column(String(50), nullable=False)
+
+    # active — объект на сцене; closed — трек завершён (причина в closed_reason).
+    status = Column(String(20), nullable=False, default="active")
+    # lost — объект пропал из кадра; restart — консьюмер перезапустился,
+    # состояние трекеров в памяти потеряно, «висящие» active закрыты при старте.
+    closed_reason = Column(String(20), nullable=True)
+
+    first_seen_at = Column(DateTime, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False)
+    closed_at = Column(DateTime, nullable=True)
+    first_frame_index = Column(Integer, nullable=False)
+    last_frame_index = Column(Integer, nullable=False)
+    # Сколько кадров трек был подтверждён (не сколько шёл по предсказанию KF)
+    num_frames = Column(Integer, nullable=False, default=1)
+
+    # Последний наблюдённый бокс — для отладки и дашборда без join с детекциями
+    bbox_x1 = Column(Float, nullable=True)
+    bbox_y1 = Column(Float, nullable=True)
+    bbox_x2 = Column(Float, nullable=True)
+    bbox_y2 = Column(Float, nullable=True)
+
+    stream = relationship("Stream")
+
+    __table_args__ = (
+        Index("idx_tracks_stream_status", "stream_id", "status"),
+        Index("idx_tracks_stream_last_seen", "stream_id", "last_seen_at"),
     )
 
 

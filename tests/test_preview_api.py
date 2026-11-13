@@ -7,12 +7,13 @@
 
 Все тесты — герметичные: БД in-memory, MinIO/Kafka замоканы.
 """
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
 
 from app.core.database import get_db
-from app.db.models import Stream, StreamDetection, Video, VideoDetection
+from app.db.models import Stream, StreamDetection, Track, Video, VideoDetection
 from app.main import app
 
 
@@ -66,6 +67,43 @@ def client_with_stream_detections(client):
             bbox_x1=10, bbox_y1=20, bbox_x2=50, bbox_y2=80,
             frame_index=frame_index,
         ))
+    db.commit()
+    db.close()
+    yield client
+
+
+@pytest.fixture
+def client_with_tracks(client):
+    """1 стрим + 2 трека (active/closed) + детекции со ссылками на треки."""
+    db = next(app.dependency_overrides[get_db]())
+
+    stream = Stream(name="Track stream", rtsp_url="rtsp://t", status="active", fps=5)
+    db.add(stream)
+    db.commit()
+
+    t_active = Track(
+        stream_id=stream.id, class_name="person", status="active",
+        first_seen_at=datetime(2026, 11, 12, 10, 0, 0),
+        last_seen_at=datetime(2026, 11, 12, 10, 0, 30),
+        first_frame_index=100, last_frame_index=150, num_frames=40,
+        bbox_x1=1, bbox_y1=2, bbox_x2=3, bbox_y2=4,
+    )
+    t_closed = Track(
+        stream_id=stream.id, class_name="car", status="closed",
+        closed_reason="lost",
+        first_seen_at=datetime(2026, 11, 12, 9, 0, 0),
+        last_seen_at=datetime(2026, 11, 12, 9, 0, 12),
+        closed_at=datetime(2026, 11, 12, 9, 0, 14),
+        first_frame_index=10, last_frame_index=70, num_frames=25,
+    )
+    db.add_all([t_active, t_closed])
+    db.commit()
+
+    db.add(StreamDetection(
+        stream_id=stream.id, class_name="person", confidence=0.9,
+        bbox_x1=10, bbox_y1=20, bbox_x2=50, bbox_y2=80,
+        frame_index=150, track_id=t_active.id,
+    ))
     db.commit()
     db.close()
     yield client
@@ -238,6 +276,51 @@ class TestStreamDetectionsByFrame:
         )
         assert r.status_code == 200
         assert r.json() == []
+
+    def test_detections_include_track_id(self, client_with_tracks):
+        r = client_with_tracks.get("/api/streams/1/detections?frame_index=150")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["track_id"] is not None
+
+
+# ============================================================
+# ТЕСТЫ: GET /api/streams/{id}/tracks
+# ============================================================
+class TestStreamTracks:
+    def test_returns_all_newest_first(self, client_with_tracks):
+        r = client_with_tracks.get("/api/streams/1/tracks")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 2
+        # active трек виделся позже closed — он первый
+        assert data[0]["status"] == "active"
+        assert data[0]["class_name"] == "person"
+        assert data[1]["status"] == "closed"
+        assert data[1]["closed_reason"] == "lost"
+
+    def test_duration_sec_computed(self, client_with_tracks):
+        data = client_with_tracks.get("/api/streams/1/tracks").json()
+        assert data[0]["duration_sec"] == 30.0
+        assert data[1]["duration_sec"] == 12.0
+
+    def test_bbox_null_when_never_observed(self, client_with_tracks):
+        data = client_with_tracks.get("/api/streams/1/tracks").json()
+        closed = next(t for t in data if t["status"] == "closed")
+        assert closed["bbox"] is None
+
+    def test_filter_by_status(self, client_with_tracks):
+        data = client_with_tracks.get("/api/streams/1/tracks?status=active").json()
+        assert len(data) == 1
+        assert data[0]["status"] == "active"
+        data = client_with_tracks.get("/api/streams/1/tracks?status=closed").json()
+        assert len(data) == 1
+        assert data[0]["closed_reason"] == "lost"
+
+    def test_404_for_unknown_stream(self, client):
+        r = client.get("/api/streams/999/tracks")
+        assert r.status_code == 404
 
 
 # ============================================================

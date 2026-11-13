@@ -46,6 +46,9 @@ dependencies = [
     # (падают с numpy 2.x), 4.13.0.90 — тянет системный libxcb.so.1 (нет в
     # slim-образах), 4.13.0.92 — обе проблемы починены
     "opencv-python-headless==4.13.0.92",
+    # Трекинг (app/tracking): венгерский алгоритм ассоциации «трек-детекция».
+    # scipy нужен detection-консьюмеру; лёгкое CPU-ядро, torch не тянет.
+    "scipy==1.16.2",
     # Kafka / S3
     "confluent-kafka==2.4.0",
     "minio==7.2.15",
