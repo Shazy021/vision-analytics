@@ -101,22 +101,33 @@ RTSP URL -> app.streams.producer.FrameProducer (subprocess, spawned by stream_ma
     |
 Reads RTSP via OpenCV.VideoCapture (forced TCP transport in Docker)
     |
-Every Nth frame:
-  - Encode JPEG, publish as binary envelope (metadata + JPEG)
-  - Publish to Kafka topic "raw_frames"
+Frame selection by WALL CLOCK (every frame is decoded — a GOP cannot be
+decoded with skips — but JPEG is encoded only for the selected frame):
+  - Encode JPEG (q80), publish as binary envelope (metadata + JPEG)
+  - Publish to Kafka topic "raw_frames" (6 partitions, no key — even spread)
         |
-        +--> app.consumers.yolo_frames.YOLOConsumer
-        |      - Decode frame, send to Triton (async)
+        +--> app.consumers.yolo_frames.YOLOConsumer (x3)
+        |      - JPEG intake: raw frame bytes go into the DALI ensemble
+        |        yolo_jpeg (nvImageCodec decode + resize/letterbox on
+        |        Triton's GPU) — no client-side imdecode; requests are
+        |        padded to the TRITON_JPEG_PAD bucket, otherwise dynamic
+        |        batching cannot merge them
+        |      - async flow of single requests, YOLO_INFER_WINDOW in flight
         |      - Save frames WITH detections to MinIO: streams/{stream_id}/{index}.jpg
-        |      - Publish detections to Kafka topic "detections"
+        |      - Publish detections to Kafka topic "detections" (key = stream_id)
         |
         +--> (no second consumer on raw_frames)
 
-Kafka topic "detections"
+Kafka topic "detections" (6 partitions, keyed by stream_id — a whole stream
+goes to one owner because the tracker lives in the consumer's memory)
         |
-        +--> app.consumers.detections.DetectionConsumer
-               - Read detections from Kafka
-               - Write Detection rows to PostgreSQL (with stream_id)
+        +--> app.consumers.detections.DetectionConsumer (x3)
+               - Reads detections in batches (bulk transaction, not per-row)
+               - Tracks objects with ByteTrack (app/tracking): two-stage IoU
+                 association over Kalman prediction, stable track_id across
+                 detection gaps and occlusions
+               - Writes Detection rows (with track_id) and track lifecycle
+                 (tracks: opened/touched/closed) to PostgreSQL
 ```
 
 Stream lifecycle (desired-state + reconciler pattern):
@@ -124,6 +135,7 @@ Stream lifecycle (desired-state + reconciler pattern):
 2. `POST /api/streams/{id}/start` — write `desired_status=active` (the API spawns NOTHING)
 3. `POST /api/streams/{id}/stop` — write `desired_status=inactive`
 4. `DELETE /api/streams/{id}` — delete row + delete frames from MinIO
+   (the bucket purge runs in the background: DELETE answers in tens of ms)
 
 The API is only an "intent writer": it records `desired_status` in the DB. The
 actual producer processes are owned by a separate service, `stream_manager`
@@ -219,7 +231,8 @@ All support `source=video|stream` filter and `video_id` / `stream_id` filters.
   overlay. Player sync is client-side — Streamlit cannot hit the server per frame.
 - **"Streams" page**: add/start/stop/delete RTSP, live preview (polling
   `/latest-frame` at a configurable 2–10 s interval), activity chart,
-  recent detections.
+  recent detections, a crop gallery of objects and a **tracks panel**
+  (who is in frame, for how long, active/closed — from `/api/streams/{id}/tracks`).
 - API calls cached with 10s TTL (`@st.cache_data`)
 - Streams-page auto-refresh: `st.rerun()` runs strictly at the end of the page
   (rerun aborts script execution, so any sections below it would never render)
@@ -228,7 +241,7 @@ All support `source=video|stream` filter and `video_id` / `stream_id` filters.
 
 ## Data Model
 
-Three PostgreSQL tables (`app/db/models.py`), versioned with Alembic.
+Four PostgreSQL tables (`app/db/models.py`), versioned with Alembic.
 
 ![ER diagram](diagrams/erd.drawio.png)
 
@@ -276,12 +289,36 @@ object), so retention is planned by age (`detected_at`), not source lifetime.
 | `confidence` | float | |
 | `bbox_x1/y1/x2/y2` | float | bounding box |
 | `detected_at` | datetime | wall-clock detection time |
+| `track_id` | int FK → `tracks.id` | detection's track (NULL before tracking); `ON DELETE SET NULL` — detections outlive the track |
 
 Indexed on `(stream_id, class_name)`, `(stream_id, detected_at)`.
 
 Previously a single `detections` table with a nullable FK pair
 (`video_id` XOR `stream_id`); the split makes the "exactly one owner"
 invariant part of the schema (NOT NULL FK) and separates retention plans.
+
+### `tracks`
+Lifecycle of a tracked stream object (ByteTrack, `app/tracking`). The row
+opens when ByteTrack confirms a track (`track_min_hits` hits), updates on
+every frame containing the object, and closes on loss (the object stays
+unconfirmed for longer than `track_max_age_sec`, counted in the stream's
+delivered frames) or on a consumer restart (tracker state lives in memory).
+Foundation for future zones/dwell-time: "who, where and for how long" reads
+straight from here without regrouping raw detections.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | int PK | referenced by `stream_detections.track_id` |
+| `stream_id` | int FK → `streams.id` | NOT NULL, `ON DELETE CASCADE` |
+| `class_name` | varchar(50) | |
+| `status` | varchar(20) | `active` / `closed` |
+| `closed_reason` | varchar(20) | `lost` (object gone) / `restart` (tracker state lost) |
+| `first_seen_at` / `last_seen_at` / `closed_at` | datetime | life boundaries |
+| `first_frame_index` / `last_frame_index` | int | |
+| `num_frames` | int | CONFIRMED frames (not Kalman-predicted ones) |
+| `bbox_x1/y1/x2/y2` | float | last observed box (debug/dashboard without a join) |
+
+Indexed on `(stream_id, status)`, `(stream_id, last_seen_at)`.
 
 ### `streams`
 | Column | Type | Notes |
@@ -318,7 +355,7 @@ app/
 │   ├── metrics.py              # Prometheus metrics, helpers, start_metrics_server
 │   └── topics.py               # Kafka topic names, bootstrap servers
 ├── db/
-│   └── models.py               # SQLAlchemy: Video, Detection, Stream
+│   └── models.py               # SQLAlchemy: Video, Detection, Stream, Track
 ├── api/                        # compose service: api
 │   └── routes/
 │       ├── videos.py           # CRUD: upload, list, get, status, frame, delete
@@ -334,16 +371,21 @@ app/
 ├── streams/                    # compose service: stream-manager
 │   ├── manager.py              # reconciler: desired-state loop over producers
 │   └── producer.py             # FrameProducer: RTSP/file -> Kafka raw_frames
+├── tracking/                   # ByteTrack (lives inside the detection consumer)
+│   ├── byte_tracker.py         # two-stage high/low association, birth/death
+│   ├── kalman.py               # KalmanBox: constant-velocity box prediction
+│   ├── association.py          # IoU matrix + Hungarian assignment (scipy)
+│   └── registry.py             # one tracker per stream, frame budget from fps
 └── consumers/                  # Kafka consumer services (one module per container)
     ├── video.py                # VideoConsumer: video_requests -> process_video -> DB
-    ├── yolo_frames.py          # raw_frames -> Triton -> detections + MinIO
-    └── detections.py           # DetectionConsumer: detections -> PostgreSQL
+    ├── yolo_frames.py          # raw_frames -> Triton (JPEG intake) -> detections + MinIO
+    └── detections.py           # DetectionConsumer: detections -> ByteTrack -> PostgreSQL
 
 alembic/                        # DB migrations (alembic upgrade head)
 tests/                          # pytest: API, TritonDetector, extractor, streams, consumers
 dashboard/                      # Streamlit app
 monitoring/                     # observability as code
-├── prometheus/prometheus.yml   #   targets; video-consumer via dns_sd per-replica
+├── prometheus/prometheus.yml   #   targets; video- and detection-consumer via dns_sd per-replica
 └── grafana/provisioning/       #   datasource + dashboards as JSON (edit = commit)
 .github/workflows/              # CI (lint + test), Docker build
 docker-compose.yml              # All services, incl. triton (its GPU reservation lives here)
@@ -391,13 +433,14 @@ Client polls GET /api/videos/{id}/status -> "completed"
 FrameProducer: read RTSP -> encode JPEG -> publish Kafka "raw_frames"
     |
     v
-YOLOConsumer: consume "raw_frames" -> Triton -> publish "detections"
+YOLOConsumer: consume "raw_frames" -> JPEG into Triton's DALI ensemble
+    |                                  -> publish "detections" (key stream_id)
     |                                  -> save frame to MinIO (if detections > 0)
     v
-DetectionConsumer: consume "detections" -> write Detection rows to PostgreSQL
-    |
+DetectionConsumer: consume "detections" -> ByteTrack (stable track_id)
+    |                    -> Detection rows + tracks lifecycle in PostgreSQL
     v
-Dashboard: GET /api/streams/{id}/detections + /api/analytics/stream-activity
+Dashboard: GET /api/streams/{id}/detections + /tracks + /api/analytics/stream-activity
 ```
 
 ---
@@ -411,7 +454,8 @@ Dashboard: GET /api/streams/{id}/detections + /api/analytics/stream-activity
 | Migrations | Alembic |
 | Object Storage | MinIO (S3-compatible) |
 | Message Queue / Task Queue | Kafka (KRaft mode, no ZooKeeper) — events AND video tasks |
-| ML | YOLOv8 on Triton Inference Server (TensorRT engine, NMS in graph) |
+| ML | YOLOv8 on Triton Inference Server (TensorRT engine, NMS in graph, DALI JPEG intake) |
+| Tracking | ByteTrack (two-stage IoU association over Kalman prediction, scipy) |
 | Media | OpenCV + FFmpeg |
 | Dashboard | Streamlit + Plotly |
 | Observability | Prometheus + Grafana + kafka-exporter |
@@ -440,8 +484,8 @@ Services in `docker-compose.yml`:
 | `kafka-init` | cp-kafka:7.6.0 | — | One-shot: create topics |
 | `triton` | nvcr.io/nvidia/tritonserver | 8001 (gRPC), 8002 (metrics) | YOLOv8 inference (TensorRT), GPU reservation |
 | `video-consumer` | vap-cpu | — | video_requests -> process_video -> DB (replicas: 2) |
-| `yolo-consumer` | vap-cpu | — | Kafka -> Triton -> detections |
-| `detection-consumer` | vap-cpu | — | Kafka -> PostgreSQL |
+| `yolo-consumer` | vap-cpu | — | Kafka -> Triton (JPEG intake) -> detections (replicas: 3, GIL ceiling ~110 msg/s per replica) |
+| `detection-consumer` | vap-cpu | — | Kafka -> ByteTrack -> PostgreSQL (replicas: 3; detections partitions keyed by stream_id, a whole stream has one owner) |
 | `stream-manager` | vap-cpu | — | Reconciler: owns producer subprocesses |
 | `mediamtx` | bluenviron/mediamtx | 8554 | RTSP server (camera simulation) |
 | `minio` | minio/minio | 9000, 9001 | Object storage + web console |
@@ -472,7 +516,7 @@ Prometheus scrapes every 15s, Grafana renders PromQL. Configs live in
 |----------|------|------------------|
 | api | 8000 | HTTP requests/latency (prometheus-fastapi-instrumentator) |
 | yolo-consumer | 9091 | frames: decode/inference/queue wait on `raw_frames`, poison |
-| detection-consumer | 9092 | detection writes, detections queue |
+| detection-consumer | 9092 | detection writes, detections queue, tracking |
 | video-consumer | 9093 | task trace: queue wait (from API `enqueued_at`), task total, chunk stages decode/inference/write (buckets up to 600s) |
 | kafka-exporter | 9308 | group lag, topic sizes (computed by the broker — always honest) |
 
@@ -480,14 +524,15 @@ Dashboards: Pipeline Overview (health), Streams Trace (+`stream_id`),
 Video Track (full trace + "overhead" panel as a regression guard for heavy
 per-task init), Infra (Kafka/API/processes).
 
-**Per-replica scraping.** video-consumer runs 2+ replicas: one DNS name
-resolves round-robin, so a single static target interleaved the replicas'
-counters into one series (13/16/13/16). Prometheus treats each drop as a
-counter reset, and `rate()`/`increase()`/quantiles then invent far more
-tasks than ever ran. Fix: `dns_sd_configs type=A` — Docker DNS returns every
-replica IP for the service name, Prometheus scrapes each separately.
-Dashboards aggregate with `sum()` / `sum by (le)`, so totals stay totals.
-(`tasks.<service>` is not needed — that's Swarm; Compose resolves the name.)
+**Per-replica scraping.** video-consumer and detection-consumer run 2+
+replicas: one DNS name resolves round-robin, so a single static target
+interleaved the replicas' counters into one series (13/16/13/16). Prometheus
+treats each drop as a counter reset, and `rate()`/`increase()`/quantiles
+then invent far more tasks than ever ran. Fix: `dns_sd_configs type=A` —
+Docker DNS returns every replica IP for the service name, Prometheus scrapes
+each separately. Dashboards aggregate with `sum()` / `sum by (le)`, so totals
+stay totals. (`tasks.<service>` is not needed — that's Swarm; Compose
+resolves the name.)
 
 **Reading quantiles.** `rate(...[15m])` is a sliding window: lines decay
 when idle (memory of recent tasks), and quantiles are noisy on sparse data.
@@ -507,6 +552,36 @@ observations — don't trust the quantile.
 - Streams are ephemeral — empty frames have no value
 - 1 stream ≈ 24 GB/day at 5 FPS; filtering saves ~80% storage
 - Lifecycle rule auto-deletes frames older than 7 days
+
+### Why JPEG intake (DALI ensemble) instead of client-side decoding?
+- yolo-consumer used to burn CPU on imdecode+letterbox for every frame; with
+  JPEG intake the consumer ships raw JPEG bytes to Triton and the GPU does
+  decode (nvImageCodec), resize and letterbox in the `dali_letterbox` step of
+  the `yolo_jpeg` ensemble
+- Double win: consumer CPU frees up, and the gRPC request is ~100 KB instead
+  of a 1.23 MB raw tensor — the network path stops being the bottleneck
+- Triton's dynamic batching only merges identical input shapes, and JPEGs
+  vary in length — requests are padded to the `TRITON_JPEG_PAD` bucket
+  (64 KB): before padding the DALI step batched at 1.04 (242 fps), after —
+  15.9 (424 fps). The decoder stops at the EOI marker, the zero tail is inert
+- Drift vs the client-side cv2 path measured with `drift_check.py`:
+  matched@0.5 0.908, IoU 0.962 — within the 0.90 threshold
+- The video path (processor.py) stays on `yolo_detector`: its frames come
+  out of cv2 decode, re-encoding them to JPEG for the ensemble would lose
+  quality and CPU
+
+### Why does tracking live in the detection consumer, not in yolo?
+- The tracker only needs the detection JSON — the heavy part (inference) is
+  untouched, the yolo-consumer/Triton ceiling does not suffer
+- Tracker state is in-memory, so `detections` partitions are keyed by
+  `stream_id`: a whole stream goes to one replica, per-stream order holds,
+  one object cannot get several track_id
+- Lost-track TTL is counted in delivered FRAMES, not seconds: a source or
+  inference pause does not kill tracks, the budget scales with the stream's
+  fps automatically (`registry._budget_frames`)
+- A `tracks` row opens on track CONFIRMATION (`min_hits`), not on birth:
+  the quiet death of a single-frame detector phantom would otherwise leave
+  forever-"active" rows in the DB
 
 ### Why do producer processes belong to a separate stream_manager (reconciler)?
 - A producer is a long-running blocking loop (reads RTSP forever) and cannot run
@@ -546,9 +621,21 @@ observations — don't trust the quantile.
   for the async flow, because Triton's dynamic batching merges engine runs by
   itself (details and measurements in the `app/consumers/yolo_frames.py`
   module docstring)
+- In-flight window `YOLO_INFER_WINDOW=64` per replica: 3 replicas × 128
+  over-saturated the DALI queue (Little's law) and collapsed latency at
+  300 fps; with 64 the engine still forms batches of 16 (engine max) while
+  the queue stays shallow
+- Measured ceiling (bench 2026-11-13, RTX 5080 / 28-core Docker Desktop):
+  stable 240 msg/s, marginal capacity ~340 msg/s at e2e p95 0.84 s; the wall
+  is Triton starving on CPU (live service 350 req/s vs 460-490 measured
+  idle), not the GPU
 - Kafka `message.max.bytes`: 5 MB (JPEG frames in a binary envelope)
 - Kafka retention: `raw_frames` = 1 hour, `detections` = 24 hours, `video_requests` = 24 hours
 - MinIO upload: `fput_object` (multipart) for videos, `put_object` for frames
+- Autovacuum: `tracks` and `stream_detections` take bulk UPDATE/INSERT every
+  batch — the default threshold (50 + 20% of rows) trips on a small table and
+  vacuum ran 148 times during a 19-minute run (an I/O storm on the slow
+  Docker VM disk). Thresholds raised by migration `b4d92c1f7a35`
 
 ---
 
@@ -568,6 +655,9 @@ curl -X POST http://localhost:8000/api/streams \
 
 # Start a stream
 curl -X POST http://localhost:8000/api/streams/1/start
+
+# Stream tracks (ByteTrack)
+curl http://localhost:8000/api/streams/1/tracks
 
 # Get analytics
 curl "http://localhost:8000/api/analytics/stats?source=video"

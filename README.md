@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/Shazy021/vision-analytics/actions/workflows/ci.yml/badge.svg)
 
-Платформа видеоаналитики: загрузка видео / RTSP-стрим → YOLO-детекция → Kafka → PostgreSQL → REST API → Streamlit-дашборд.
+Платформа видеоаналитики: загрузка видео / RTSP-стрим → YOLO-детекция → Kafka → трекинг объектов (ByteTrack) → PostgreSQL → REST API → Streamlit-дашборд.
 
 ## Демо
 
@@ -19,7 +19,8 @@
 <p align="center"><img src="docs/diagrams/architecture.drawio.png" alt="Архитектура платформы: API, Kafka, GPU-консьюмеры, PostgreSQL, MinIO"><br><em>Архитектура системы — подробности в <a href="docs/ARCHITECTURE.ru.md">доках</a> (<a href="docs/ARCHITECTURE.md">EN</a>).</em></p>
 
 - **API**: FastAPI, Pydantic, SQLAlchemy
-- **CV**: YOLOv8 на NVIDIA Triton Inference Server (TensorRT, NMS в графе), OpenCV
+- **CV**: YOLOv8 на NVIDIA Triton Inference Server (TensorRT, NMS в графе, JPEG-intake с DALI-декодом на GPU), OpenCV
+- **Трекинг**: ByteTrack (двухстадийная ассоциация IoU поверх Kalman-предсказания)
 - **БД**: PostgreSQL, Alembic (миграции)
 - **Дашборд**: Streamlit, Plotly
 - **Очереди/события**: Kafka (KRaft), confluent-kafka
@@ -39,7 +40,7 @@ cp .env.example .env
 docker-compose up -d
 ```
 
-Поднимутся 15 сервисов (17 контейнеров с учётом реплик video-consumer ×2 и yolo-consumer ×2): db, minio, kafka, kafka-init (разовый — создаёт топики), triton, api, dashboard, stream-manager, video-consumer (x2), yolo-consumer (x2), detection-consumer, mediamtx, prometheus, grafana, kafka-exporter.
+Поднимутся 15 сервисов (20 контейнеров с учётом реплик yolo-consumer ×3, detection-consumer ×3 и video-consumer ×2): db, minio, kafka, kafka-init (разовый — создаёт топики), triton, api, dashboard, stream-manager, video-consumer (x2), yolo-consumer (x3), detection-consumer (x3), mediamtx, prometheus, grafana, kafka-exporter.
 
 <p align="center"><img src="demos/docker-compose-ps.png" alt="Docker Desktop: все сервисы стека подняты"><br><em><code>kafka-init</code> в сером статусе — это норма: разовый контейнер создал топики и штатно завершился.</em></p>
 
@@ -117,7 +118,7 @@ ffmpeg -stream_loop -1 -re -i data/test_v.mp4 -c:v copy -an -f rtsp -rtsp_transp
 
 **Шаг 3.** Нажать ▶️ Запустить — API запишет намерение (`desired_status=active`), а сервис `stream_manager` поднимет Frame Producer subprocess'ом.
 
-Пайплайн: Producer → Kafka (`raw_frames`) → YOLO Consumer → Kafka (`detections`) → Detection Consumer → PostgreSQL.
+Пайплайн: Producer → Kafka (`raw_frames`) → YOLO Consumer → Kafka (`detections`, ключ — stream_id) → Detection Consumer → трекинг ByteTrack (стабильный `track_id` через гэпы и окклюзии) → PostgreSQL (`stream_detections` + `tracks`).
 
 <p align="center"><img src="demos/detection-gallery.png" alt="📋 Галерея детекций стрима: кропы объектов с классом и уверенностью"><br><em>📋 Галерея детекций на странице Стримы — кропы объектов с классом и уверенностью.</em></p>
 
@@ -177,9 +178,10 @@ queue wait → задача целиком → этапы чанка decode/infe
 серые столбцы (правая ось) — число задач в окне: где их мало, квантилю верить
 нельзя. Лаг `video-workers` считается брокером и всегда честный.
 
-> 📡 video-consumer скрейпится **per-replica** (`dns_sd type=A`): один таргет на
-> round-robin DNS-имя сервиса склеивал счётчики двух реплик в одну серию, и
-> `rate()`/квантили рисовали фантомные задачи. Конфиг — `monitoring/prometheus/prometheus.yml`.
+> 📡 video-consumer и detection-consumer скрейпятся **per-replica** (`dns_sd type=A`):
+> один таргет на round-robin DNS-имя сервиса склеивал счётчики реплик в одну
+> серию, и `rate()`/квантили рисовали фантомные задачи. Конфиг —
+> `monitoring/prometheus/prometheus.yml`.
 
 ### Локально (без Docker)
 
@@ -262,6 +264,7 @@ pre-commit install
 | POST | /api/streams/{id}/stop | Остановить обработку |
 | GET | /api/streams/{id}/latest-frame | Последний кадр стрима (превью) |
 | GET | /api/streams/{id}/detections | Детекции стрима |
+| GET | /api/streams/{id}/tracks | Треки стрима (ByteTrack: кто, когда и сколько пробыл) |
 
 ### Аналитика
 
@@ -288,9 +291,9 @@ pre-commit install
 
 | Топик | Retention | Описание |
 |-------|-----------|----------|
-| `raw_frames` | 1 час | Кадры от Producer (бинарный конверт: мета + JPEG) |
-| `detections` | 24 часа | YOLO-детекции (JSON) |
-| `video_requests` | 24 часа | Задачи на обработку загруженных видео (JSON) |
+| `raw_frames` | 1 час | Кадры от Producer (бинарный конверт: мета + JPEG), 6 партиций, без ключа — ровная раздача |
+| `detections` | 24 часа | YOLO-детекции (JSON), 6 партиций, ключ `stream_id` — стрим целиком достаётся одному detection-консьюмеру (трекер в памяти) |
+| `video_requests` | 24 часа | Задачи на обработку загруженных видео (JSON), 8 партиций |
 
 Kafka — транспорт, не хранилище. Все детекции сохраняются в PostgreSQL.
 
@@ -300,14 +303,15 @@ Kafka — транспорт, не хранилище. Все детекции �
 ├── app/
 │   ├── api/routes/          # API endpoints (videos, streams, analytics)
 │   ├── core/                # Config, database, storage, Kafka topics, metrics
-│   ├── db/models.py         # SQLAlchemy models (Video, Stream, Detection)
+│   ├── db/models.py         # SQLAlchemy models (Video, Stream, Detection, Track)
 │   ├── schemas/             # Pydantic schemas
 │   ├── processing/          # Обработка видео: processor, triton_detector, extractor
 │   ├── streams/             # Стримы: reconciler (manager) + FrameProducer
+│   ├── tracking/            # ByteTrack: byte_tracker, kalman, association, registry
 │   ├── consumers/           # Kafka-консьюмеры (модуль = контейнер)
 │   │   ├── video.py         # video_requests → processor → БД
 │   │   ├── yolo_frames.py   # raw_frames → Triton → detections + MinIO
-│   │   └── detections.py    # detections → PostgreSQL
+│   │   └── detections.py    # detections → трекинг ByteTrack → PostgreSQL
 │   └── main.py              # FastAPI entry point
 ├── dashboard/
 │   └── app.py               # Streamlit dashboard
