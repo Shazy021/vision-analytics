@@ -6,15 +6,18 @@
 SessionLocal() в обход Depends(get_db) ломает герметичность тестов.
 Сессию закрывает сам get_db (yield + finally) — вручную db.close() не нужен.
 """
+import logging
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core import storage
 from app.core.database import get_db
-from app.db.models import Stream, StreamDetection
+from app.db.models import Stream, StreamDetection, Track
 from app.schemas.stream import StreamCreate, StreamResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/streams", tags=["streams"])
 
@@ -67,19 +70,33 @@ def create_stream(data: StreamCreate, db: Session = Depends(get_db)):
     )
 
 
+def _purge_stream_frames(stream_id: int) -> None:
+    """Фоновая зачистка кадров стрима из S3 (после ответа клиенту).
+
+    На стриме с детекциями это тысячи объектов: синхронный delete_prefix
+    внутри запроса уводил DELETE за таймауты клиентов (у бенча — 30 с) и
+    ронял зачистку стенда. Ошибку только логируем: строка Stream уже
+    удалена, повторного триггера нет — осиротевшие объекты дороже не станут.
+    """
+    try:
+        storage.delete_prefix(f"streams/{stream_id}/")
+    except Exception:
+        logger.exception("Фоновая чистка S3 для стрима %s не удалась", stream_id)
+
+
 @router.delete("/{stream_id}")
-def delete_stream(stream_id: int, db: Session = Depends(get_db)):
+def delete_stream(stream_id: int, background: BackgroundTasks, db: Session = Depends(get_db)):
     stream = db.query(Stream).filter(Stream.id == stream_id).first()
     if not stream:
         raise HTTPException(status_code=404, detail="Stream not found")
     # Процесс здесь НЕ трогаем: как только строка Stream исчезнет из БД,
     # стрим перестанет входить в desired-множество reconciler'а, и тот на
     # ближайшем витке сам убьёт его producer'а (см. app/streaming/manager.py).
-    # Удаляем кадры стрима из S3
-    storage.delete_prefix(f"streams/{stream_id}/")
-
     db.delete(stream)
     db.commit()
+    # Кадры стрима из S3 вычищаем фоном ПОСЛЕ ответа: десятки тысяч объектов
+    # под нагрузкой — минуты работы MinIO, клиенту ждать их незачем.
+    background.add_task(_purge_stream_frames, stream_id)
     return {"deleted": True}
 
 
@@ -259,8 +276,56 @@ def stream_detections(
             "class_name": d.class_name,
             "confidence": d.confidence,
             "stream_id": d.stream_id,
+            "track_id": d.track_id,
             "bbox": [d.bbox_x1, d.bbox_y1, d.bbox_x2, d.bbox_y2],
             "detected_at": str(d.detected_at),
         }
         for d in detections
+    ]
+
+
+@router.get("/{stream_id}/tracks")
+def stream_tracks(
+    stream_id: int,
+    status: str | None = Query(
+        None,
+        description="Фильтр по статусу: active / closed. Пусто — все треки.",
+    ),
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """Треки стрима (трекинг v1, ByteTrack).
+
+    Сортировка — по последней видимости (свежие первее): активные треки
+    почти всегда и так оказываются наверху, а закрытые идут хвостом в
+    порядке угасания. duration_sec считаем здесь, а не на клиенте:
+    timestamps наивные UTC, и вычитать их «на глаз» из строки — верный
+    способ получить рассинхрон с часами браузера.
+    """
+    stream = db.query(Stream).filter(Stream.id == stream_id).first()
+    if not stream:
+        raise HTTPException(status_code=404, detail="Stream not found")
+
+    query = db.query(Track).filter(Track.stream_id == stream_id)
+    if status:
+        query = query.filter(Track.status == status)
+    tracks = query.order_by(Track.last_seen_at.desc()).limit(limit).all()
+
+    return [
+        {
+            "id": t.id,
+            "class_name": t.class_name,
+            "status": t.status,
+            "closed_reason": t.closed_reason,
+            "first_seen_at": str(t.first_seen_at),
+            "last_seen_at": str(t.last_seen_at),
+            "closed_at": str(t.closed_at) if t.closed_at else None,
+            "first_frame_index": t.first_frame_index,
+            "last_frame_index": t.last_frame_index,
+            "num_frames": t.num_frames,
+            "duration_sec": (t.last_seen_at - t.first_seen_at).total_seconds(),
+            "bbox": [t.bbox_x1, t.bbox_y1, t.bbox_x2, t.bbox_y2]
+            if t.bbox_x1 is not None else None,
+        }
+        for t in tracks
     ]

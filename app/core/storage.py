@@ -152,10 +152,15 @@ def file_exists(object_name: str) -> bool:
 
 
 def delete_prefix(prefix: str):
-    """Удалить все файлы с префиксом (например, frames/1/)."""
+    """Удалить все файлы с префиксом (например, streams/1/).
+
+    remove_objects шлёт удаления пачками по 1000 объектов: 10k кадров
+    стрима — ~10 HTTP-запросов вместо 10k remove_object. Ошибки
+    отдельных объектов не прерывают обход — только логируются.
+    """
     objects = client.list_objects(BUCKET, prefix=prefix, recursive=True)
-    for obj in objects:
-        client.remove_object(BUCKET, obj.object_name)
+    for error in client.remove_objects(BUCKET, (obj.object_name for obj in objects)):
+        logger.warning("Не удалось удалить объект при чистке префикса %s: %s", prefix, error)
 
 
 def list_objects(prefix: str, recursive: bool = True):
