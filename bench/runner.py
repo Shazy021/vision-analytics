@@ -321,7 +321,10 @@ def run_benchmark(cfg: RunConfig) -> RunResult:
         timeline.add("abort", result.summary["aborted"])
         logger.exception("Прогон упал — сохраняю измеренные шаги")
     finally:
-        impl.teardown(cfg.keep_artifacts)
+        # Итоги собираем ДО зачистки: teardown — единственная часть прогона,
+        # где остались внешние вызовы (API/RTSP), и ронять из-за него
+        # уже отмеренные шаги нельзя (прогон stream-20261112-234356 потерял
+        # так отчёт: Ctrl+C во время teardown унёс результат до persist).
         result.timeline = timeline.events
         result.environment = _environment(wall_start)
         result.summary["health"] = impl.health()
@@ -330,4 +333,9 @@ def run_benchmark(cfg: RunConfig) -> RunResult:
         except Exception as exc:  # noqa: BLE001 — итоги не должны ронять прогон
             logger.error("Не удалось собрать summary: %s", exc)
             result.summary.setdefault("aborted", f"ошибка итогов: {exc}")
+        try:
+            impl.teardown(cfg.keep_artifacts)
+        except BaseException as exc:  # noqa: BLE001 — включая Ctrl+C: отчёт дороже
+            logger.error("Зачистка прервана (%s) — отчёт всё равно будет сохранён",
+                         type(exc).__name__)
     return result

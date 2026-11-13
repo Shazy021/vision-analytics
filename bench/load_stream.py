@@ -84,7 +84,7 @@ class StreamLoadController:
         for sid in list(self._active):
             try:
                 self.api.stop_stream(sid)
-            except ApiError:
+            except Exception:  # noqa: BLE001 — зачистка идёт до конца для всех
                 logger.warning("Не удалось остановить стрим %s — продолжаю", sid)
         self._active.clear()
 
@@ -104,6 +104,6 @@ class StreamLoadController:
             try:
                 self.api.delete_stream(s["id"])
                 logger.info("Стрим %s (%s) удалён", s["id"], s.get("name"))
-            except ApiError:
+            except Exception:  # noqa: BLE001 — один таймаут не должен бросать остальные
                 logger.warning("Не удалось удалить стрим %s — продолжаю", s["id"])
         self._active.clear()
