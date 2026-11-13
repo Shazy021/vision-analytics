@@ -516,7 +516,16 @@ class YOLOConsumer:
         if not self._ready:
             return
         for msg, meta, det in self._ready:
+            # Ключ — stream_id: все кадры стрима падают в одну партицию
+            # detections (hash(stream_id) % N), а значит достаются одному
+            # detection-консьюмеру. Трекинг живёт в памяти консьюмера, и
+            # расширение detections без ключа размазало бы один стрим по
+            # нескольким трекерам — один самолёт получил бы несколько
+            # track_id, каждый консьюмер видел бы его через кадр. С ключом
+            # партиций можно делать сколько угодно — стрим всегда целиком у
+            # одного владельца.
             self.producer.produce(TOPIC_DETECTIONS,
+                                  key=str(meta["stream_id"]),
                                   value=self._detection_message(meta, det))
             frame_processed_total.labels(result="ok").inc()
             # Чистый кадр в MinIO — ТОЛЬКО если на нём есть детекции

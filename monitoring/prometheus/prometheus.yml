@@ -30,9 +30,15 @@ scrape_configs:
         port: 9091
         refresh_interval: 10s
 
+  # Тот же рецепт, что у video-consumer ниже: detection-consumer масштабируется
+  # репликами, static-таргет на DNS-имя чередовал бы их round-robin как один
+  # процесс и ломал rate()/квантили.
   - job_name: detection-consumer
-    static_configs:
-      - targets: ["detection-consumer:9092"]
+    dns_sd_configs:
+      - names: ["detection-consumer"]
+        type: "A"
+        port: 9092
+        refresh_interval: 10s
 
   # video-consumer масштабируется репликами: один static-таргет на DNS-имя
   # сервиса давал round-robin — Prometheus читал то одну, то другую реплику

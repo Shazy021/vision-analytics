@@ -32,7 +32,10 @@ output [
   }
 ]
 dynamic_batching {
-  preferred_batch_size: [ 8 ]
+  # Без preferred_batch_size: с [8] батчер резал очередь на куски по 8-12
+  # (замер 2026-11-13: средний батч 11.5 при растущей очереди). Пусть склеивает
+  # до max_batch_size=16, когда очередь глубокая, — движок не стена (2 инстанса
+  # тянут ~860 req/s против DALI-стадии ~380).
   max_queue_delay_microseconds: 10000
 }
 instance_group [

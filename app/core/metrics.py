@@ -28,7 +28,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from prometheus_client import Counter, Histogram, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,22 @@ frame_e2e_latency_seconds = Histogram(
     "Frame capture (captured_at) to DB commit — full stream pipeline",
     ["stream_id"],
     buckets=DURATION_BUCKETS,
+)
+
+# --- трекинг (внутри detection-consumer) ---
+track_frames_total = Counter(
+    "track_frames_total",
+    "Frames passed through the tracker by outcome",
+    ["result"],  # ok | duplicate | late
+)
+track_events_total = Counter(
+    "track_events_total",
+    "Track lifecycle events applied to DB",
+    ["event"],  # opened | closed
+)
+track_active_tracks = Gauge(
+    "track_active_tracks",
+    "Tracks alive in tracker memory (all streams)",
 )
 
 # --- video-consumer (video_requests → processor → PostgreSQL), /metrics :9093 ---

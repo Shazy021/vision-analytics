@@ -148,8 +148,11 @@ services:
       || echo 'raw_frames already has >= 6 partitions' )
       &&
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
-      --topic detections --partitions 1 --replication-factor 1
+      --topic detections --partitions 6 --replication-factor 1
       --config retention.ms=86400000
+      &&
+      ( kafka-topics --bootstrap-server kafka:29092 --alter --topic detections --partitions 6
+      || echo 'detections already has >= 6 partitions' )
       &&
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists
       --topic video_requests --partitions 8 --replication-factor 1
@@ -323,11 +326,24 @@ services:
       dockerfile: Dockerfile.cpu
     image: vap-cpu:latest
     command: python -m app.consumers.detections
+    deploy:
+      replicas: 2
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@db:5432/${POSTGRES_DB:-vision}
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
-      DETECTION_BATCH_SIZE: ${DETECTION_BATCH_SIZE:-64}
+      DETECTION_BATCH_SIZE: ${DETECTION_BATCH_SIZE:-256}
       DETECTION_BATCH_GRACE_MS: ${DETECTION_BATCH_GRACE_MS:-50}
+      # Трекинг стримов (ByteTrack, app/tracking): детекции соседних кадров
+      # склеиваются в треки со стабильным track_id, треки пишутся в таблицу
+      # tracks. Считается здесь, вне пути инференса — потолок yolo-consumer
+      # не трогает. Пороги/таймауты — см. комментарии в app/core/config.py.
+      TRACKING_ENABLED: ${TRACKING_ENABLED:-true}
+      TRACK_HIGH_THRESH: ${TRACK_HIGH_THRESH:-0.5}
+      TRACK_LOW_THRESH: ${TRACK_LOW_THRESH:-0.25}
+      TRACK_MAX_AGE_SEC: ${TRACK_MAX_AGE_SEC:-3.0}
+      TRACK_MIN_HITS: ${TRACK_MIN_HITS:-2}
+      TRACK_DEFAULT_DT_SEC: ${TRACK_DEFAULT_DT_SEC:-0.2}
+      TRACK_IDLE_EVICT_SEC: ${TRACK_IDLE_EVICT_SEC:-300}
     depends_on:
       kafka:
         condition: service_healthy
